@@ -165,6 +165,13 @@ tcc.wasm: cross-wasm32
 	  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
 	  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
 
+tcc-shellsim.wasm: cross-wasm32
+	$S./wasm32-tcc -B. -o $@ tcc.c -I. -DONE_SOURCE=1 -DTCC_TARGET_WASM32 \
+	  -DSHELLSIM_CLI -DCONFIG_TCCDIR="\"/tcc\"" -DCONFIG_SYSROOT="\"/wasi-sysroot\"" \
+	  -DCONFIG_TCC_LIBPATHS="\"{B}:{R}/lib/wasm32-wasip1\"" \
+	  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
+	  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
+
 install: ; @$(MAKE) --no-print-directory  install$(CFG)
 install-strip: ; @$(MAKE) --no-print-directory  install$(CFG) CONFIG_strip=yes
 uninstall: ; @$(MAKE) --no-print-directory uninstall$(CFG)
