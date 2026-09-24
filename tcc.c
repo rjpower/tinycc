@@ -298,6 +298,18 @@ int main(int argc, char **argv)
     char **argv0 = argv;
     FILE *ppfp = NULL;
 
+#ifdef __wasi__
+    /* WASI preopens do not carry a process cwd. Initialize wasi-libc's cwd
+       from the caller's PWD before resolving relative source and output paths. */
+    {
+        const char *pwd = getenv("PWD");
+        if (pwd && *pwd && chdir(pwd) < 0) {
+            fprintf(stderr, "tcc: cannot change to PWD '%s'\n", pwd);
+            return 1;
+        }
+    }
+#endif
+
 redo:
     argc = argc0, argv = argv0;
     s = s1 = tcc_new();
