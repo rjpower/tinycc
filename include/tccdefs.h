@@ -18,7 +18,7 @@
 
 #if __SIZEOF_POINTER__ == 4
     /* 32bit systems. */
-#if defined  __OpenBSD__
+#if defined  __OpenBSD__ || defined __wasm__
     #define __SIZE_TYPE__ unsigned long
     #define __PTRDIFF_TYPE__ long
 #else
@@ -242,6 +242,14 @@
     #define _tcc_align(addr,type) (((unsigned long)addr + __alignof__(type) - 1) \
                                   & -(__alignof__(type)))
     #define __builtin_va_arg(ap,type) (*(sizeof(type) > (2*__va_reg_size) ? *(type **)((ap += __va_reg_size) - __va_reg_size) : (ap = (va_list)(_tcc_align(ap,type) + (sizeof(type)+__va_reg_size - 1)& -__va_reg_size), (type *)(ap - ((sizeof(type)+ __va_reg_size - 1)& -__va_reg_size)))))
+
+#elif defined __wasm__
+    /* variadic arguments are passed in a buffer, each argument aligned
+       to max(4, its alignment) and occupying a multiple of 4 bytes */
+    typedef char *__builtin_va_list;
+    #define _tcc_va_align(ap,type) (((unsigned)(ap) + __alignof__(type) - 1) & -(__alignof__(type)))
+    #define __builtin_va_arg(ap,type) (ap = (char *)(_tcc_va_align(ap,type) + ((sizeof(type)+3)&~3)), \
+                                       *(type *)(ap - ((sizeof(type)+3)&~3)))
 
 #else /* __i386__ */
     typedef char *__builtin_va_list;

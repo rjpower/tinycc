@@ -15,6 +15,7 @@ const char *platform_macros[] = {
     "__ARM_EABI__",         "TCC_ARM_EABI",
     "__aarch64__",          "TCC_TARGET_ARM64",
     "__riscv",              "TCC_TARGET_RISCV64",
+    "__wasm__",             "TCC_TARGET_WASM32",
     "__APPLE__",            "TCC_TARGET_MACHO",
     "__FreeBSD__",          "TARGETOS_FreeBSD",
     "__FreeBSD_kernel__",   "TARGETOS_FreeBSD_kernel",

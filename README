@@ -91,3 +91,23 @@ TCC is distributed under the GNU Lesser General Public License (see
 COPYING file).
 
 Fabrice Bellard.
+
+WebAssembly (wasm32 / WASI)
+---------------------------
+
+A cross compiler targeting wasm32 with the wasi-libc sysroot:
+
+    make cross-wasm32 CONFIG_WASI_SYSROOT=/path/to/wasi-sysroot
+    ./wasm32-tcc -B. -o hello.wasm hello.c
+    wasmtime hello.wasm
+
+The sysroot is the one shipped by wasi-sdk or the wasi-libc package
+(include/wasm32-wasip1, lib/wasm32-wasip1); the default location is
+/opt/homebrew/opt/wasi-libc/share/wasi-sysroot. tcc links wasi-libc's
+libc.a itself (it reads wasm object files) and follows the wasm C ABI,
+so tcc compiled code interoperates with clang compiled objects.
+Undefined functions named "module.name" (via asm labels, e.g.
+int f(int) __asm__("wasi_snapshot_preview1.fd_close")) are imported
+from that module. Not supported: inline assembly, bounds checking,
+setjmp/longjmp, threads, tcc -run. 'make test-wasm' runs tests/tests2
+under wasmtime. See the overview in wasm32-gen.c for the design.

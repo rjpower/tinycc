@@ -117,6 +117,7 @@ DEF-arm64-NetBSD   = $(DEF-arm64) -DTARGETOS_NetBSD
 DEF-arm64-OpenBSD  = $(DEF-arm64) -DTARGETOS_OpenBSD
 DEF-arm64-win32    = $(DEF-arm64) -DTCC_TARGET_PE
 DEF-riscv64        = -DTCC_TARGET_RISCV64
+DEF-wasm32         = -DTCC_TARGET_WASM32
 DEF-c67            = -DTCC_TARGET_C67 -w # disable warnigs
 DEF-x86_64-FreeBSD = $(DEF-x86_64) -DTARGETOS_FreeBSD
 DEF-x86_64-NetBSD  = $(DEF-x86_64) -DTARGETOS_NetBSD
@@ -134,7 +135,7 @@ all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm64-win32 arm-wince c67
-TCC_X += riscv64 arm64-osx
+TCC_X += riscv64 arm64-osx wasm32
 # TCC_X += arm-fpa arm-fpa-ld arm-vfp arm-eabi
 
 # cross libtcc1.a targets to build
@@ -148,6 +149,10 @@ cross: $(LIBTCC1_CROSS) $(PROGS_CROSS)
 
 # build specific cross compiler & lib
 cross-%: %-tcc$(EXESUF) %-libtcc1.a ;
+
+# run tests/tests2 with the wasm32 cross compiler under wasmtime
+test-wasm: cross-wasm32
+	python3 $(TOPSRC)/tests/wasm/run-tests2.py
 
 install: ; @$(MAKE) --no-print-directory  install$(CFG)
 install-strip: ; @$(MAKE) --no-print-directory  install$(CFG) CONFIG_strip=yes
@@ -179,6 +184,11 @@ INC-$T = {B}/include:{R}/include
 LIB-$T = {R}/lib:{B}
 CRT-$T = {R}/lib
 endif
+# wasm32: uses a wasi-libc sysroot (see CONFIG_WASI_SYSROOT)
+CONFIG_WASI_SYSROOT ?= /opt/homebrew/opt/wasi-libc/share/wasi-sysroot
+ROOT-wasm32 = $(CONFIG_WASI_SYSROOT)
+INC-wasm32 = {B}/include:{R}/include/wasm32-wasip1
+LIB-wasm32 = {B}:{R}/lib/wasm32-wasip1
 DEFINES += $(DEF-$T)
 DEFINES += $(if $(ROOT-$T),-DCONFIG_SYSROOT="\"$(ROOT-$T)\"")
 DEFINES += $(if $(CRT-$T),-DCONFIG_TCC_CRTPREFIX="\"$(CRT-$T)\"")
@@ -217,6 +227,7 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 arm64-win32_FILES = $(arm64_FILES) tccpe.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
+wasm32_FILES = $(CORE_FILES) wasm32-gen.c wasm32-link.c tccwasm.c
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 

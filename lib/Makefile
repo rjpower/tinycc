@@ -74,6 +74,7 @@ OBJ-arm-eabi = $(OBJ-arm)
 OBJ-arm-eabihf = $(OBJ-arm)
 OBJ-arm-wince = $(ARM_O) $(WIN_O)
 OBJ-riscv64 = $(RISCV64_O) armflush.o $(LIN_O)
+OBJ-wasm32 = wasm-crt1.o wasm-ldouble.o wasm-atomic.o wasm-builtins.o builtin.o
 
 OBJ-extra = $(filter $(EXTRA_O),$(OBJ-$T))
 OBJ-libtcc1 = $(addprefix $(X),$(filter-out $(OBJ-extra),$(OBJ-$T)))

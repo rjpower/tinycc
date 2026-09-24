@@ -158,11 +158,13 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define TCC_TARGET_ARM64  *//* ARMv8 code generator */
 /* #define TCC_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define TCC_TARGET_RISCV64 *//* risc-v code generator */
+/* #define TCC_TARGET_WASM32 *//* WebAssembly (wasm32) code generator */
 
 /* default target is I386 */
 #if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_ARM) && \
     !defined(TCC_TARGET_ARM64) && !defined(TCC_TARGET_C67) && \
-    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64)
+    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64) && \
+    !defined(TCC_TARGET_WASM32)
 # if defined __x86_64__
 #  define TCC_TARGET_X86_64
 # elif defined __arm__
@@ -201,6 +203,14 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # endif
 #endif
 
+#ifdef TCC_TARGET_WASM32
+/* no bounds checking / backtraces / runtime on wasm (yet) */
+# undef CONFIG_TCC_BACKTRACE
+# define CONFIG_TCC_BACKTRACE 0
+# undef CONFIG_TCC_BCHECK
+# define CONFIG_TCC_BCHECK 0
+#endif
+
 #if defined CONFIG_TCC_BACKTRACE && CONFIG_TCC_BACKTRACE==0
 # undef CONFIG_TCC_BACKTRACE
 #else
@@ -224,11 +234,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
     || defined TARGETOS_NetBSD \
     || defined TARGETOS_FreeBSD_kernel
 # define TARGETOS_BSD 1
-#elif !(defined TCC_TARGET_PE || defined TCC_TARGET_MACHO)
+#elif !(defined TCC_TARGET_PE || defined TCC_TARGET_MACHO || defined TCC_TARGET_WASM32)
 # define TARGETOS_Linux 1 /* for tccdefs_.h */
 #endif
 
-#if defined TCC_TARGET_PE || defined TCC_TARGET_MACHO
+#if defined TCC_TARGET_PE || defined TCC_TARGET_MACHO || defined TCC_TARGET_WASM32
 # define ELF_OBJ_ONLY /* create elf .o but native executables */
 #else
 # define TCC_TARGET_UNIX 1
@@ -387,10 +397,21 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
 # include "riscv64-asm.c"
+#elif defined(TCC_TARGET_WASM32)
+# include "wasm32-gen.c"
+# include "wasm32-link.c"
 #else
 #error unknown target
 #endif
 #undef TARGET_DEFS_ONLY
+
+/* 'long long' is held in a pair of 32-bit registers on 32-bit targets,
+   except on wasm32 where registers are 64-bit wide */
+#if PTR_SIZE == 4 && !defined TCC_TARGET_WASM32
+# define TCC_LLONG_2WORDS 1
+#else
+# define TCC_LLONG_2WORDS 0
+#endif
 
 /* -------------------------------------------- */
 
@@ -755,6 +776,10 @@ struct TCCState {
     unsigned char dollars_in_identifiers;  /* allows '$' char in identifiers */
     unsigned char ms_bitfields; /* if true, emulate MS algorithm for aligning bitfields */
     unsigned char reverse_funcargs; /* if true, evaluate last function arg first */
+#ifdef TCC_TARGET_WASM32
+    struct { int sym, priority; } *wasm_ctors; /* init functions from wasm objects */
+    int nb_wasm_ctors;
+#endif
     unsigned char gnu89_inline; /* treat 'extern inline' like 'static inline' */
     unsigned char unwind_tables; /* create eh_frame section */
 
@@ -1291,6 +1316,7 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_BINTYPE_DYN 2
 #define AFF_BINTYPE_AR  3
 #define AFF_BINTYPE_C67 4
+#define AFF_BINTYPE_WASM 5
 
 /* return value of tcc_add_file_internal(): 0, -1, or FILE_NOT_FOUND */
 #define FILE_NOT_FOUND -2
@@ -1490,7 +1516,7 @@ ST_FUNC void vrott(int n);
 ST_FUNC void vrotb(int n);
 ST_FUNC void vrev(int n);
 ST_FUNC void vpop(void);
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
 ST_FUNC void lexpand(void);
 #endif
 #ifdef TCC_TARGET_ARM
@@ -1643,7 +1669,7 @@ ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);
 ST_FUNC void ggoto(void);
-#ifndef TCC_TARGET_C67
+#if !defined TCC_TARGET_C67 && !defined TCC_TARGET_WASM32
 ST_FUNC void o(unsigned int c);
 #endif
 ST_FUNC void gen_vla_sp_save(int addr);
@@ -1731,6 +1757,19 @@ ST_FUNC void gen_clear_cache(void);
 
 /* ------------ c67-gen.c ------------ */
 #ifdef TCC_TARGET_C67
+#endif
+
+/* ------------ wasm32-gen.c ------------ */
+#ifdef TCC_TARGET_WASM32
+ST_FUNC void gen_opl(int op);
+ST_FUNC void gen_va_start(void);
+ST_FUNC void gen_cvt_sxtw(void);
+ST_FUNC void gen_cvt_csti(int t);
+ST_FUNC const char *wasm_symbol_name(Sym *sym, const char *name);
+/* ------------ tccwasm.c ------------ */
+ST_FUNC int wasm_output_file(TCCState *s1, const char *filename);
+ST_FUNC int tcc_load_wasm_object(TCCState *s1, int fd, unsigned long file_offset);
+ST_FUNC int wasm_sig_symbol(TCCState *s1, const char *sig);
 #endif
 
 /* ------------ tcccoff.c ------------ */

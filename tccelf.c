@@ -1828,6 +1828,55 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
 {
     s1->filetype = 0;
 
+#ifdef TCC_TARGET_WASM32
+    tcc_add_pragma_libs(s1);
+    if (!s1->nostdlib) {
+        /* wasi-libc's libc-printscan-long-double.a replaces a few members
+           of libc.a. Archives are scanned in order, so reference those
+           members now if the corresponding function families are used. */
+        static const char * const families[][2] = {
+            { "printf", "vfprintf" }, { "fprintf", "vfprintf" },
+            { "sprintf", "vfprintf" }, { "snprintf", "vfprintf" },
+            { "vprintf", "vfprintf" }, { "vsprintf", "vfprintf" },
+            { "vsnprintf", "vfprintf" }, { "dprintf", "vfprintf" },
+            { "vdprintf", "vfprintf" }, { "asprintf", "vfprintf" },
+            { "vasprintf", "vfprintf" }, { "vfprintf", "vfprintf" },
+            { "wprintf", "vfwprintf" }, { "fwprintf", "vfwprintf" },
+            { "swprintf", "vfwprintf" }, { "vwprintf", "vfwprintf" },
+            { "vswprintf", "vfwprintf" }, { "vfwprintf", "vfwprintf" },
+            { "scanf", "vfscanf" }, { "fscanf", "vfscanf" },
+            { "sscanf", "vfscanf" }, { "vscanf", "vfscanf" },
+            { "vsscanf", "vfscanf" }, { "vfscanf", "vfscanf" },
+            { "strtod", "strtod" }, { "strtof", "strtod" },
+            { "strtold", "strtod" }, { "atof", "strtod" },
+            { "wcstod", "wcstod" }, { "wcstof", "wcstod" },
+            { "wcstold", "wcstod" },
+        };
+        int i, n, uses_ld;
+        /* only programs using 'long double' get the long double variants:
+           tcc computes long double in double precision, which the digit
+           generation of those variants is sensitive to */
+        uses_ld = find_elf_sym(symtab_section, "__tcc_ld_load")
+               || find_elf_sym(symtab_section, "__tcc_ld_store");
+        for (i = 0; uses_ld && i < sizeof families / sizeof families[0]; i++) {
+            n = find_elf_sym(symtab_section, families[i][0]);
+            if (n && ((ElfW(Sym) *)symtab_section->data)[n].st_shndx == SHN_UNDEF
+                && !find_elf_sym(symtab_section, families[i][1]))
+                set_global_sym(s1, families[i][1], NULL, 0);
+        }
+        /* tcc's runtime (with the crt), wasi-libc (printf/scanf with long
+           double support first), then tcc's runtime again for the
+           builtins wasi-libc needs */
+        tcc_add_support(s1, TCC_LIBTCC1);
+        if (uses_ld)
+            tcc_add_library(s1, "c-printscan-long-double");
+        if (tcc_add_library(s1, "c") < 0)
+            tcc_error_noabort("cannot find libc.a for wasm32 (see CONFIG_WASI_SYSROOT)");
+        tcc_add_support(s1, TCC_LIBTCC1);
+        tcc_add_library(s1, "c");
+    }
+#else
+
 #ifdef CONFIG_TCC_BCHECK
     tcc_add_bcheck(s1);
 #endif
@@ -1880,6 +1929,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
             tccelf_add_crtend(s1);
 #endif
     }
+#endif /* TCC_TARGET_WASM32 */
 }
 #endif /* ndef TCC_TARGET_PE */
 
@@ -3229,6 +3279,8 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
     return  pe_output_file(s, filename);
 #elif defined TCC_TARGET_MACHO
     return macho_output_file(s, filename);
+#elif defined TCC_TARGET_WASM32
+    return wasm_output_file(s, filename);
 #else
     return elf_output_file(s, filename);
 #endif
@@ -3278,6 +3330,10 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
         if (((struct filehdr*)h)->f_magic == COFF_C67_MAGIC)
             return AFF_BINTYPE_C67;
 #endif
+#ifdef TCC_TARGET_WASM32
+        if (0 == memcmp(h, "\0asm", 4))
+            return AFF_BINTYPE_WASM;
+#endif
     }
     return 0;
 }
@@ -3301,6 +3357,14 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     Section *s;
 
     lseek(fd, file_offset, SEEK_SET);
+#ifdef TCC_TARGET_WASM32
+    {
+        char magic[4];
+        if (full_read(fd, magic, 4) == 4 && 0 == memcmp(magic, "\0asm", 4))
+            return tcc_load_wasm_object(s1, fd, file_offset);
+        lseek(fd, file_offset, SEEK_SET);
+    }
+#endif
     if (tcc_object_type(fd, &ehdr) != AFF_BINTYPE_REL)
         goto invalid;
     /* test CPU specific stuff */
@@ -3706,7 +3770,11 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
                 return tcc_load_alacarte(s1, fd, size, 4);
             if (!strcmp(hdr.ar_name, "/SYM64/"))
                 return tcc_load_alacarte(s1, fd, size, 8);
-        } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
+        } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL
+#ifdef TCC_TARGET_WASM32
+                   || tcc_object_type(fd, &ehdr) == AFF_BINTYPE_WASM
+#endif
+                   ) {
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
             if (tcc_load_object_file(s1, fd, file_offset) < 0)

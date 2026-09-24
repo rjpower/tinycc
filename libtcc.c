@@ -53,6 +53,10 @@
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
 #include "riscv64-asm.c"
+#elif defined(TCC_TARGET_WASM32)
+#include "wasm32-gen.c"
+#include "wasm32-link.c"
+#include "tccwasm.c"
 #else
 #error unknown target
 #endif
@@ -1004,6 +1008,9 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type)
     tcc_add_macos_sdkpath(s);
 # endif
 
+#elif defined TCC_TARGET_WASM32
+    /* no crt objects, see tccwasm.c */
+
 #else
     /* paths for crt objects */
     tcc_split_path(s, &s->crt_paths, &s->nb_crt_paths, CONFIG_TCC_CRTPREFIX);
@@ -1078,6 +1085,12 @@ static int tcc_add_binary(TCCState *s1, int flags, const char *filename, int fd)
     case AFF_BINTYPE_REL:
         ret = tcc_load_object_file(s1, fd, 0);
         break;
+
+#ifdef TCC_TARGET_WASM32
+    case AFF_BINTYPE_WASM:
+        ret = tcc_load_wasm_object(s1, fd, 0);
+        break;
+#endif
 
     case AFF_BINTYPE_AR:
         ret = tcc_load_archive(s1, fd, !(flags & AFF_WHOLE_ARCHIVE));
@@ -1303,6 +1316,8 @@ LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname)
         "%s/%s.def", "%s/lib%s.def", "%s/%s.dll", "%s/lib%s.dll",
 #elif defined TCC_TARGET_MACHO
         "%s/lib%s.dylib", "%s/lib%s.tbd",
+#elif defined TCC_TARGET_WASM32
+        /* static libraries only */
 #elif defined TARGETOS_OpenBSD
         "%s/lib%s.so.*",
 #else
@@ -1785,6 +1800,8 @@ static const char dumpmachine_str[] =
     "aarch64"
 #elif defined TCC_TARGET_RISCV64
     "riscv64"
+#elif defined TCC_TARGET_WASM32
+    "wasm32"
 #endif
     "-"
 #ifdef TCC_TARGET_PE

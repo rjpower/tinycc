@@ -250,7 +250,7 @@ static int R_RET(int t)
 static int R2_RET(int t)
 {
     t &= VT_BTYPE;
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
     if (t == VT_LLONG)
         return REG_IRE2;
 #elif defined TCC_TARGET_X86_64
@@ -558,6 +558,10 @@ ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
             name = get_tok_str(sym->asm_label, NULL);
             can_add_underscore = 0;
         }
+#ifdef TCC_TARGET_WASM32
+        else if (sym_type == STT_FUNC)
+            name = wasm_symbol_name(sym, name);
+#endif
 
         if (tcc_state->leading_underscore && can_add_underscore) {
             buf1[0] = '_';
@@ -2025,7 +2029,7 @@ ST_FUNC void gv2(int rc1, int rc2)
     }
 }
 
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
 /* expand 64bit on stack in two ints */
 ST_FUNC void lexpand(void)
 {
@@ -2048,7 +2052,7 @@ ST_FUNC void lexpand(void)
 }
 #endif
 
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
 /* build a long long from two ints */
 static void lbuild(int t)
 {
@@ -2066,7 +2070,7 @@ static void gv_dup(void)
     int t, rc, r;
 
     t = vtop->type.t;
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
     if ((t & VT_BTYPE) == VT_LLONG) {
         if (t & VT_BITFIELD) {
             gv(RC_INT);
@@ -2097,7 +2101,7 @@ static void gv_dup(void)
     vtop->r = r;
 }
 
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
 /* generate CPU independent (unsigned) long long operations */
 static void gen_opl(int op)
 {
@@ -3180,7 +3184,7 @@ op_err:
         gv(RC_TYPE(vtop->type.t));
 }
 
-#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_ARM
+#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_ARM || defined TCC_TARGET_WASM32
 #define gen_cvt_itof1 gen_cvt_itof
 #else
 /* generic itof for unsigned long long case */
@@ -3207,7 +3211,7 @@ static void gen_cvt_itof1(int t)
 }
 #endif
 
-#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
+#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_WASM32
 #define gen_cvt_ftoi1 gen_cvt_ftoi
 #else
 /* generic ftoi for unsigned long long case */
@@ -3423,7 +3427,7 @@ error:
         gv(RC_INT);
 
         trunc = 0;
-#if PTR_SIZE == 4
+#if TCC_LLONG_2WORDS
         if (ds == 8) {
             /* generate high word */
             if (sbt & VT_UNSIGNED) {
@@ -3442,11 +3446,11 @@ error:
         }
         ss = 4;
 
-#elif PTR_SIZE == 8
+#else
         if (ds == 8) {
             /* need to convert from 32bit to 64bit */
             if (sbt & VT_UNSIGNED) {
-#if defined(TCC_TARGET_RISCV64)
+#if defined(TCC_TARGET_RISCV64) || defined(TCC_TARGET_WASM32)
                 /* RISC-V keeps 32bit vals in registers sign-extended.
                    So here we need a zero-extension.  */
                 trunc = 32;
@@ -3472,7 +3476,7 @@ error:
 
         if (ds >= ss)
             goto done;
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_WASM32
     if (ss == 4) {
         gen_cvt_csti(dbt);
         goto done;
@@ -5912,7 +5916,7 @@ ST_FUNC void unary(void)
             }
         }
         break;
-#ifdef TCC_TARGET_RISCV64
+#if defined TCC_TARGET_RISCV64 || defined TCC_TARGET_WASM32
     case TOK_builtin_va_start:
         parse_builtin_params(0, "ee");
         r = vtop->r & VT_VALMASK;

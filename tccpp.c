@@ -3559,6 +3559,8 @@ static const char * const target_os_defs =
     "__NetBSD__\0"
 # elif TARGETOS_OpenBSD
     "__OpenBSD__\0"
+# elif defined TCC_TARGET_WASM32
+    /* __wasm__ etc. come from target_machine_defs */
 # else
     "__linux__\0"
     "__linux\0"
