@@ -47,6 +47,19 @@
    - the output ELF object holds, per function, "<signature>\0" followed
      by the wasm function body (locals + code).  Relocations are padded
      5-byte LEBs.  tccwasm.c turns the linked sections into a module.
+
+   setjmp/longjmp
+   --------------
+   As in LLVM's "wasm sjlj" lowering, longjmp is an exception (tag
+   __c_longjmp) thrown by wasi-libc's __wasm_longjmp.  A call to setjmp
+   becomes __wasm_setjmp(env, label, fp): the label is the block index
+   of the code following the call, fp identifies the invocation.  In a
+   function that calls setjmp every call is wrapped in a try_table
+   catching the tag; the landing code asks __wasm_setjmp_test whether
+   the jmp_buf belongs to this invocation, rethrows if not, and
+   otherwise dispatches to the label with the longjmp value as the
+   result of setjmp.  Since C locals live in the frame and wasm locals
+   survive the unwinding, nothing else needs saving.
 */
 
 #ifdef TARGET_DEFS_ONLY
@@ -87,6 +100,7 @@ ST_DATA const char * const target_machine_defs =
     "__wasm__\0"
     "__wasm32__\0"
     "__wasi__\0"
+    "__wasm_exception_handling__\0" /* setjmp/longjmp, see wasi-libc's setjmp.h */
     ;
 
 ST_DATA const int reg_classes[NB_REGS] = {
@@ -101,9 +115,9 @@ ST_DATA const int reg_classes[NB_REGS] = {
 
 enum {
     W_UNREACHABLE = 0x00, W_NOP = 0x01, W_BLOCK = 0x02, W_LOOP = 0x03,
-    W_IF = 0x04, W_ELSE = 0x05, W_END = 0x0b, W_BR = 0x0c, W_BR_IF = 0x0d,
-    W_BR_TABLE = 0x0e, W_RETURN = 0x0f, W_CALL = 0x10, W_CALL_INDIRECT = 0x11,
-    W_DROP = 0x1a, W_SELECT = 0x1b,
+    W_IF = 0x04, W_ELSE = 0x05, W_THROW = 0x08, W_END = 0x0b, W_BR = 0x0c,
+    W_BR_IF = 0x0d, W_BR_TABLE = 0x0e, W_RETURN = 0x0f, W_CALL = 0x10,
+    W_CALL_INDIRECT = 0x11, W_DROP = 0x1a, W_SELECT = 0x1b, W_TRY_TABLE = 0x1f,
     W_LOCAL_GET = 0x20, W_LOCAL_SET = 0x21, W_LOCAL_TEE = 0x22,
     W_GLOBAL_GET = 0x23, W_GLOBAL_SET = 0x24,
     W_I32_LOAD = 0x28, W_I64_LOAD = 0x29, W_F32_LOAD = 0x2a, W_F64_LOAD = 0x2b,
@@ -146,6 +160,7 @@ enum {
 };
 
 #define W_BLOCKTYPE_VOID 0x40
+#define W_BLOCKTYPE_I32  0x7f
 
 /* pseudo instructions in the intermediate stream (prefixed by 0xff) */
 enum {
@@ -158,6 +173,9 @@ enum {
     P_LOCADDR,      /* [i32 loc]                      push address fp+frame+loc */
     P_MEM,          /* [u8 opcode][u8 align][i32 loc] memory op at fp+frame+loc */
     P_JMPIND,       /* computed goto: L_LBL holds the target block */
+    P_CALLBEG,      /* [u8 blocktype]                 start of a call sequence (args + call) */
+    P_CALLEND,      /* end of a call sequence */
+    P_SJLABEL,      /* [u32 target]                   push the i32 block index of target */
 };
 
 #define P_JMP_SIZE 6
@@ -168,6 +186,9 @@ enum {
 #define P_LOCADDR_SIZE 6
 #define P_MEM_SIZE 8
 #define P_JMPIND_SIZE 2
+#define P_CALLBEG_SIZE 3
+#define P_CALLEND_SIZE 2
+#define P_SJLABEL_SIZE 6
 
 /* jump targets are stored with this bit set; without it the field is
    a link in a not yet resolved jump chain (0 = end of chain) */
@@ -355,6 +376,31 @@ static void p_mem(int opc, int align, int loc)
     g_raw(opc);
     g_raw(align);
     g_le32_raw(loc);
+}
+
+/* the wasm block type of a signature result char */
+static int blocktype_of(int c)
+{
+    switch (c) {
+    case 'i': return 0x7f;
+    case 'I': return 0x7e;
+    case 'f': return 0x7d;
+    case 'F': return 0x7c;
+    }
+    return W_BLOCKTYPE_VOID;
+}
+
+static void p_callbeg(int res)
+{
+    g_raw(0xff);
+    g_raw(P_CALLBEG);
+    g_raw(blocktype_of(res));
+}
+
+static void p_callend(void)
+{
+    g_raw(0xff);
+    g_raw(P_CALLEND);
 }
 
 /* ---------------------------------------------------------------- */
@@ -794,6 +840,59 @@ static void push_arg_value(SValue *e, char kind)
     }
 }
 
+/* setjmp(env): __wasm_setjmp(env, label, fp), see the overview */
+static void gen_setjmp(int nb_args)
+{
+    int r, fix, sp_slot;
+    while (nb_args > 1) { /* sigsetjmp's savemask */
+        vpop();
+        nb_args--;
+    }
+    r = gv(RC_INT);
+    save_reg_upstack(REG_IRET, 2);
+    /* the stack pointer (below earlier allocas) is restored after a longjmp */
+    loc = (loc - 4) & -4;
+    sp_slot = loc;
+    w_local_get(L_FP);
+    w_op_idx(W_GLOBAL_GET, 0);
+    p_mem(W_I32_STORE, 2, sp_slot);
+    w_local_get(L_REG(r));
+    w_op(W_I32_WRAP_I64);
+    g_raw(0xff);
+    g_raw(P_SJLABEL);
+    fix = ind;
+    g_le32_raw(0);
+    w_local_get(L_FP);
+    gen_helper_call("__wasm_setjmp", "iii:");
+    /* the direct return: 0. Longjmps land after this, with the
+       longjmp value already in the return register. */
+    w_i64_const(0);
+    w_local_set(L_REG(REG_IRET));
+    if (!nocode_wanted)
+        write32le(cur_text_section->data + fix, ind | JMP_RESOLVED);
+    w_local_get(L_FP);
+    p_mem(W_I32_LOAD, 2, sp_slot);
+    w_op_idx(W_GLOBAL_SET, 0);
+    vtop -= 2;
+}
+
+/* the linker name of the called function (e.g. __builtin_alloca is
+   renamed to alloca by an asm label in tccdefs.h) */
+static const char *callee_name(SValue *fn)
+{
+    int v = fn->sym->asm_label ? fn->sym->asm_label : fn->sym->v;
+    return v >= TOK_IDENT ? get_tok_str(v, NULL) : "";
+}
+
+static int callee_is(SValue *fn, const char *a, const char *b, const char *c)
+{
+    const char *name = callee_name(fn);
+    return !strcmp(name, a) || !strcmp(name, b) || !strcmp(name, c);
+}
+
+#define is_setjmp_call(fn) callee_is(fn, "setjmp", "_setjmp", "sigsetjmp")
+#define is_longjmp_call(fn) callee_is(fn, "longjmp", "_longjmp", "siglongjmp")
+
 /* Generate function call. The function address is pushed first, then
    all the parameters in call order. This functions pops all the
    parameters and the function address. */
@@ -818,8 +917,7 @@ ST_FUNC void gfunc_call(int nb_args)
 
     /* alloca is an intrinsic: allocate below the stack pointer, the
        memory is released when the function returns */
-    if (is_direct && nb_args == 1 && fn->sym->v >= TOK_IDENT
-        && !strcmp(get_tok_str(fn->sym->v, NULL), "alloca")) {
+    if (is_direct && nb_args == 1 && !strcmp(callee_name(fn), "alloca")) {
         r = gv(RC_INT);
         w_op_idx(W_GLOBAL_GET, 0);
         w_local_get(L_REG(r));
@@ -835,6 +933,12 @@ ST_FUNC void gfunc_call(int nb_args)
         vtop -= 2;
         return;
     }
+    if (is_direct && nb_args >= 1 && is_setjmp_call(fn)) {
+        gen_setjmp(nb_args);
+        return;
+    }
+    if (is_direct && nb_args == 2 && is_longjmp_call(fn))
+        fn->sym = external_helper_sym(tok_alloc_const("__wasm_longjmp"));
 
     /* a long double result comes back through a hidden pointer to a
        temporary in our frame */
@@ -934,6 +1038,8 @@ ST_FUNC void gfunc_call(int nb_args)
     }
 
     /* pass 3: emit the call */
+    res = strchr(sig, ':') + 1;
+    p_callbeg(*res);
     if (ld_ret)
         p_locaddr(ld_sret);
     for (i = 0; i < nb_args; i++)
@@ -948,7 +1054,7 @@ ST_FUNC void gfunc_call(int nb_args)
         p_type(sig);
         w_uleb(0); /* table index */
     }
-    res = strchr(sig, ':') + 1;
+    p_callend();
     if (ld_ret) {
         p_locaddr(ld_sret);
         gen_helper_call("__tcc_ld_load", "i:F");
@@ -1163,9 +1269,48 @@ static int pseudo_size(int tag)
     case P_LOCADDR: return P_LOCADDR_SIZE;
     case P_MEM: return P_MEM_SIZE;
     case P_JMPIND: return P_JMPIND_SIZE;
+    case P_CALLBEG: return P_CALLBEG_SIZE;
+    case P_CALLEND: return P_CALLEND_SIZE;
+    case P_SJLABEL: return P_SJLABEL_SIZE;
     }
     tcc_error("internal: bad pseudo op %d", tag);
     return 0;
+}
+
+/* the landing code of a caught longjmp; the thrown value, a pointer
+   to wasi-libc's { void *env; int val; }, is on the stack */
+static void emit_landing(void)
+{
+    Section *s = cur_text_section;
+    int start = func_ind;
+    ob(W_UNREACHABLE); /* the last block never falls through */
+    ob(W_END);         /* the landing block */
+    ob(W_LOCAL_SET); ouleb(L_T0);
+    /* label = __wasm_setjmp_test(arg->env, fp) */
+    ob(W_LOCAL_GET); ouleb(L_T0);
+    ob(W_I32_LOAD); ouleb(2); ouleb(0);
+    ob(W_LOCAL_GET); ouleb(L_FP);
+    ob(W_CALL);
+    put_elf_reloca(symtab_section, s, start + wasm_out.size, R_WASM_FUNC_LEB,
+                   elf_sym_index(external_helper_sym(tok_alloc_const("__wasm_setjmp_test"))), 0);
+    ouleb_padded(0);
+    put_elf_reloca(symtab_section, s, start + wasm_out.size, R_WASM_SIG, sig_sym_index("ii:i"), 0);
+    ob(W_LOCAL_TEE); ouleb(L_LBL);
+    /* not for this invocation: rethrow to the callers */
+    ob(W_I32_EQZ);
+    ob(W_IF); ob(W_BLOCKTYPE_VOID);
+    ob(W_LOCAL_GET); ouleb(L_T0);
+    ob(W_THROW);
+    put_elf_reloca(symtab_section, s, start + wasm_out.size, R_WASM_TAG_LEB,
+                   wasm_tag_symbol(tcc_state, "__c_longjmp"), 0);
+    ouleb_padded(0);
+    ob(W_END);
+    /* setjmp returns arg->val */
+    ob(W_LOCAL_GET); ouleb(L_T0);
+    ob(W_I32_LOAD); ouleb(2); ouleb(4);
+    ob(W_I64_EXTEND_I32_S);
+    ob(W_LOCAL_SET); ouleb(L_REG(REG_IRET));
+    ob(W_BR); ouleb(0); /* the dispatch loop */
 }
 
 static int jmp_target(unsigned char *code, int p, int start, int end)
@@ -1187,7 +1332,7 @@ static void wasm_finish_function(int frame)
     unsigned char *lead;
     int *blk;
     int start = func_ind, end = ind, len = end - start;
-    int p, tag, n, i, j, cur, has_back, nblocks;
+    int p, tag, n, i, j, cur, has_back, nblocks, sjlj, loopd;
     Section *s = cur_text_section;
 
     if (nocode_wanted)
@@ -1207,7 +1352,7 @@ static void wasm_finish_function(int frame)
 
     /* pass 1: find basic block leaders */
     lead[0] = 1;
-    has_back = 0;
+    has_back = sjlj = 0;
     for (p = start; p < end; ) {
         if (code[p] != 0xff) {
             p++;
@@ -1219,6 +1364,11 @@ static void wasm_finish_function(int frame)
             p += pseudo_size(tag);
             if (tag == P_JMP)
                 lead[p - start] = 1;
+        } else if (tag == P_SJLABEL) {
+            /* longjmps come back through the dispatch loop */
+            lead[jmp_target(code, p, start, end)] = 1;
+            has_back = sjlj = 1;
+            p += pseudo_size(tag);
         } else if (tag == P_JMPIND) {
             has_back = 1;
             p += pseudo_size(tag);
@@ -1278,6 +1428,12 @@ static void wasm_finish_function(int frame)
     if (has_back) {
         ob(W_LOOP); ob(W_BLOCKTYPE_VOID);
     }
+    /* the landing block of longjmp: it encloses all blocks, so the
+       loop is one level further out */
+    loopd = sjlj;
+    if (sjlj) {
+        ob(W_BLOCK); ob(W_BLOCKTYPE_I32);
+    }
     for (i = 0; i < n; i++) {
         ob(W_BLOCK); ob(W_BLOCKTYPE_VOID);
     }
@@ -1316,11 +1472,11 @@ static void wasm_finish_function(int frame)
             } else {
                 ob(W_I32_CONST); osleb(j);
                 ob(W_LOCAL_SET); ouleb(L_LBL);
-                ob(W_BR); ouleb(n - cur - 1);
+                ob(W_BR); ouleb(n - cur - 1 + loopd);
             }
             break;
         case P_JMPIND:
-            ob(W_BR); ouleb(n - cur - 1);
+            ob(W_BR); ouleb(n - cur - 1 + loopd);
             break;
         case P_JMPIF:
             j = blk[jmp_target(code, p, start, end)];
@@ -1334,9 +1490,29 @@ static void wasm_finish_function(int frame)
                 ob(W_IF); ob(W_BLOCKTYPE_VOID);
                 ob(W_I32_CONST); osleb(j);
                 ob(W_LOCAL_SET); ouleb(L_LBL);
-                ob(W_BR); ouleb(n - cur);
+                ob(W_BR); ouleb(n - cur + loopd);
                 ob(W_END);
             }
+            break;
+        case P_CALLBEG:
+            if (sjlj) {
+                /* try_table (result) catch __c_longjmp -> landing block */
+                ob(W_TRY_TABLE); ob(code[p + 2]);
+                ouleb(1);
+                ob(0x00);
+                put_elf_reloca(symtab_section, s, start + wasm_out.size, R_WASM_TAG_LEB,
+                               wasm_tag_symbol(tcc_state, "__c_longjmp"), 0);
+                ouleb_padded(0);
+                ouleb(n - cur - 1);
+            }
+            break;
+        case P_CALLEND:
+            if (sjlj)
+                ob(W_END);
+            break;
+        case P_SJLABEL:
+            j = blk[jmp_target(code, p, start, end)];
+            ob(W_I32_CONST); osleb(j);
             break;
         case P_SYM: {
             int type = code[p + 2];
@@ -1375,6 +1551,8 @@ static void wasm_finish_function(int frame)
         }
         p += pseudo_size(tag);
     }
+    if (sjlj)
+        emit_landing();
     if (has_back)
         ob(W_END);
     ob(W_UNREACHABLE);

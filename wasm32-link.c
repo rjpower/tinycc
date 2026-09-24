@@ -14,6 +14,7 @@
 #define R_WASM_GLOB_DAT  7
 #define R_WASM_COPY      8
 #define R_WASM_RELATIVE  9
+#define R_WASM_TAG_LEB  10 /* padded uleb128 in code: tag index */
 
 #define R_DATA_32   R_WASM_32
 #define R_DATA_PTR  R_WASM_32
@@ -22,7 +23,7 @@
 #define R_COPY      R_WASM_COPY
 #define R_RELATIVE  R_WASM_RELATIVE
 
-#define R_NUM       10
+#define R_NUM       11
 
 #define ELF_START_ADDR 0x1000
 #define ELF_PAGE_SIZE  0x1000
@@ -46,6 +47,7 @@ ST_FUNC int code_reloc (int reloc_type)
     case R_WASM_FUNC_LEB:
     case R_WASM_TYPE_LEB:
     case R_WASM_SIG:
+    case R_WASM_TAG_LEB:
         return 1;
     }
     return -1;

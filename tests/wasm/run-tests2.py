@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run tests/tests2 with the wasm32 cross compiler under wasmtime.
+"""Run tests/tests2 and tests/wasm/*.c with the wasm32 cross compiler under wasmtime.
 
 usage: tests/wasm/run-tests2.py [name-substring ...]
 
@@ -24,12 +24,13 @@ SKIP=set("""34_array_assignment 85_asm-outside-function 95_bitfields 95_bitfield
 117_builtins 119_random_stuff 124_atomic_counter 126_bound_global 127_asm_goto 138_arm64_encoding
 140_arm64_extasm 141_riscv_asm 144_tls 145_winarm64_interlocked 146_tls_extern 148_linker_symbols""".split())
 tests=sorted(glob.glob(SRC+'/[0-9][0-9]_*.c')+glob.glob(SRC+'/[0-9][0-9][0-9]_*.c'))
+tests+=sorted(glob.glob(TOP+'/tests/wasm/*.c'))  # wasm specific tests, e.g. setjmp
 npass=nfail=0; fails=[]
 for t in tests:
     name=os.path.basename(t)[:-2]
     if only and not any(o in name for o in only): continue
     if not only and name in SKIP: continue
-    exp=SRC+'/'+name+'.expect'
+    exp=t[:-2]+'.expect'
     if not os.path.exists(exp): continue
     if '[test_' in open(exp,errors='replace').read(): continue  # -dt snippet tests need -run
     wasm=OUT+'/'+name+'.wasm'

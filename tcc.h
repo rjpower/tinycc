@@ -36,16 +36,7 @@
 #include <errno.h>
 #include <math.h>
 #include <fcntl.h>
-#ifdef __wasm__
-/* wasi-libc has no setjmp/longjmp: when tcc itself runs as wasm, a
-   fatal compile error exits the process instead of unwinding to
-   tcc_compile() (see _tcc_error) */
-typedef int jmp_buf[1];
-# define setjmp(jb) ((jb)[0] = 0)
-# define longjmp(jb, v) exit(v)
-#else
-# include <setjmp.h>
-#endif
+#include <setjmp.h>
 #include <time.h>
 
 #ifndef _WIN32
@@ -1779,6 +1770,7 @@ ST_FUNC const char *wasm_symbol_name(Sym *sym, const char *name);
 ST_FUNC int wasm_output_file(TCCState *s1, const char *filename);
 ST_FUNC int tcc_load_wasm_object(TCCState *s1, int fd, unsigned long file_offset);
 ST_FUNC int wasm_sig_symbol(TCCState *s1, const char *sig);
+ST_FUNC int wasm_tag_symbol(TCCState *s1, const char *name);
 #endif
 
 /* ------------ tcccoff.c ------------ */

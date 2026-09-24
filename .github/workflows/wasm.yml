@@ -55,7 +55,8 @@ jobs:
         cp tcc.wasm wasm32-libtcc1.a dist/tcc-wasm/
         cp include/*.h dist/tcc-wasm/include/
         cat > dist/tcc-wasm/README <<'TXT'
-        tcc compiled to WebAssembly (wasm32 cross compiler, WASI).
+        tcc compiled to WebAssembly (wasm32 cross compiler, WASI). It uses
+        the wasm exception handling proposal (wasmtime 49 has it enabled).
 
         Needs a wasi-libc sysroot (wasi-sdk's wasi-sysroot) mounted at
         /wasi-sysroot and this directory mounted at /tcc:

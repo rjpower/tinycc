@@ -33,6 +33,9 @@
      table indices, against data symbols to linear memory addresses.
    - undefined functions whose name is "module.name" are imported from
      that module.
+   - exception tags are symbols in the (non-alloc) ".wasm.tag" section,
+     whose data is the tag's signature; R_WASM_TAG_LEB relocs (throw,
+     try_table catch clauses) resolve to tag indices.
 */
 
 #include "tcc.h"
@@ -66,6 +69,9 @@ typedef struct WasmLink {
     int *off_func;      /* text offset -> function, or -1 */
     char **types;
     int nb_types;
+    int *tags;          /* elf symbol index per tag, in tag index order */
+    int *tag_types;
+    int nb_tags;
     int nb_imports;
     int nb_table;
     unsigned data_end, stack_top, heap_base, heap_end;
@@ -330,6 +336,43 @@ static void scan_relocs(WasmLink *wl)
     }
 }
 
+/* number the tags referenced from code */
+static void collect_tags(WasmLink *wl)
+{
+    TCCState *s1 = wl->s1;
+    Section *s;
+    ElfW_Rel *rel;
+    ElfW(Sym) *esym;
+    int i, j, sym;
+
+    for (i = 1; i < s1->nb_sections; i++) {
+        s = s1->sections[i];
+        if (!s->reloc || !(s->sh_flags & SHF_ALLOC))
+            continue;
+        for_each_elem(s->reloc, 0, rel, ElfW_Rel) {
+            if (ELFW(R_TYPE)(rel->r_info) != R_WASM_TAG_LEB)
+                continue;
+            sym = ELFW(R_SYM)(rel->r_info);
+            for (j = 0; j < wl->nb_tags; j++)
+                if (wl->tags[j] == sym)
+                    break;
+            if (j < wl->nb_tags)
+                continue;
+            esym = elf_sym(sym);
+            if (esym->st_shndx == SHN_UNDEF) {
+                tcc_error_noabort("undefined tag '%s' (setjmp/longjmp need wasi-libc's libsetjmp.a)", elf_sym_name(sym));
+                continue;
+            }
+            wl->tags = tcc_realloc(wl->tags, (wl->nb_tags + 1) * sizeof(int));
+            wl->tag_types = tcc_realloc(wl->tag_types, (wl->nb_tags + 1) * sizeof(int));
+            wl->tags[wl->nb_tags] = sym;
+            wl->tag_types[wl->nb_tags] = type_index(wl,
+                (char *)s1->sections[esym->st_shndx]->data + esym->st_value);
+            wl->nb_tags++;
+        }
+    }
+}
+
 static void assign_indices(WasmLink *wl)
 {
     TCCState *s1 = wl->s1;
@@ -495,6 +538,11 @@ static void apply_relocs(WasmLink *wl)
                 break;
             case R_WASM_SIG:
                 break;
+            case R_WASM_TAG_LEB:
+                for (fi = 0; fi < wl->nb_tags && wl->tags[fi] != sym; fi++)
+                    ;
+                patch_uleb(p, fi);
+                break;
             default:
                 tcc_error_noabort("internal: unknown relocation type %d", type);
                 break;
@@ -588,6 +636,16 @@ static void emit_module(WasmLink *wl, CString *mod)
     wo_byte(&sec, 0x00);
     wo_uleb(&sec, wl->heap_end / WASM_PAGE_SIZE);
     wo_section(mod, 5, &sec);
+
+    /* tag section */
+    if (wl->nb_tags) {
+        wo_uleb(&sec, wl->nb_tags);
+        for (i = 0; i < wl->nb_tags; i++) {
+            wo_byte(&sec, 0x00);
+            wo_uleb(&sec, wl->tag_types[i]);
+        }
+        wo_section(mod, 13, &sec);
+    }
 
     /* global section: __stack_pointer */
     wo_uleb(&sec, 1);
@@ -731,6 +789,7 @@ ST_FUNC int wasm_output_file(TCCState *s1, const char *filename)
     collect_functions(&wl);
     scan_relocs(&wl);
     assign_indices(&wl);
+    collect_tags(&wl);
     check_undefined(&wl);
     if (s1->nb_errors)
         goto the_end;
@@ -764,6 +823,8 @@ ST_FUNC int wasm_output_file(TCCState *s1, const char *filename)
     tcc_free(wl.sym_sig);
     tcc_free(wl.weak_stubs);
     tcc_free(wl.off_func);
+    tcc_free(wl.tags);
+    tcc_free(wl.tag_types);
     dynarray_reset(&wl.types, &wl.nb_types);
     return ret;
 }
@@ -781,6 +842,32 @@ ST_FUNC int wasm_sig_symbol(TCCState *s1, const char *sig)
         c = put_elf_sym(symtab_section, 0, 0,
                         ELFW(ST_INFO)(STB_WEAK, STT_NOTYPE), 0, SHN_ABS, name);
     return c;
+}
+
+/* the elf symbol of the tag 'name', undefined until an object defines it */
+ST_FUNC int wasm_tag_symbol(TCCState *s1, const char *name)
+{
+    int c = find_elf_sym(symtab_section, name);
+    if (!c)
+        c = set_elf_sym(symtab_section, 0, 0,
+                        ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, name);
+    return c;
+}
+
+/* define the tag 'name' with signature 'sig' */
+static int wasm_define_tag(TCCState *s1, const char *name, const char *sig, int bind, int other)
+{
+    Section *sec = NULL;
+    int len = strlen(sig) + 1, off, i;
+    for (i = 1; i < s1->nb_sections; i++)
+        if (!strcmp(s1->sections[i]->name, ".wasm.tag"))
+            sec = s1->sections[i];
+    if (!sec)
+        sec = new_section(s1, ".wasm.tag", SHT_PROGBITS, 0);
+    off = section_add(sec, len, 1);
+    memcpy(sec->data + off, sig, len);
+    return set_elf_sym(symtab_section, off, len, ELFW(ST_INFO)(bind, STT_NOTYPE),
+                       other, sec->sh_num, name);
 }
 
 /* ---------------------------------------------------------------- */
@@ -856,6 +943,8 @@ typedef struct WObj {
     WImport **imports; int nb_imports;
     int nb_func_imports;
     int *func_types; int nb_funcs;            /* defined functions */
+    int *tag_types; int nb_tags;              /* defined tags */
+    int nb_tag_imports;
     unsigned *body_start, *body_len;          /* in code contents */
     unsigned *text_off;                       /* in text_section */
     unsigned code_contents, code_len;         /* code section contents */
@@ -1002,6 +1091,11 @@ static void parse_import_section(WObj *o, WRd *r)
             rd_byte(r);
             rd_byte(r);
             break;
+        case 4: /* tag */
+            rd_byte(r); /* attribute */
+            im->type = rd_uleb(r);
+            o->nb_tag_imports++;
+            break;
         default:
             r->err = 1;
             break;
@@ -1017,6 +1111,17 @@ static void parse_function_section(WObj *o, WRd *r)
     o->func_types = tcc_mallocz((n + 1) * sizeof(int));
     for (i = 0; i < n && !r->err; i++)
         o->func_types[i] = rd_uleb(r);
+}
+
+static void parse_tag_section(WObj *o, WRd *r)
+{
+    unsigned n = rd_uleb(r), i;
+    o->nb_tags = n;
+    o->tag_types = tcc_mallocz((n + 1) * sizeof(int));
+    for (i = 0; i < n && !r->err; i++) {
+        rd_byte(r); /* attribute */
+        o->tag_types[i] = rd_uleb(r);
+    }
 }
 
 static void parse_code_section(WObj *o, WRd *r, unsigned contents)
@@ -1209,6 +1314,21 @@ static void define_symbols(WObj *o)
                 wobj_error(o, buf);
             }
             break;
+        case WSYM_TAG:
+            if (sym->flags & WSYM_UNDEFINED) {
+                WImport *im = find_import(o, 4, sym->index);
+                if (!im) { wobj_error(o, "bad tag import"); break; }
+                if (!name)
+                    name = im->name;
+                if (bind == STB_LOCAL)
+                    bind = STB_GLOBAL;
+                sym->elfsym = set_elf_sym(symtab_section, 0, 0, ELFW(ST_INFO)(bind, STT_NOTYPE), other, SHN_UNDEF, name);
+            } else {
+                int ti = sym->index - o->nb_tag_imports;
+                if (ti < 0 || ti >= o->nb_tags || o->tag_types[ti] >= o->nb_sigs) { wobj_error(o, "bad tag index"); break; }
+                sym->elfsym = wasm_define_tag(s1, name, o->sigs[o->tag_types[ti]], bind, other);
+            }
+            break;
         case WSYM_TABLE:
             if (!(sym->flags & WSYM_UNDEFINED))
                 wobj_error(o, "unsupported table definition");
@@ -1321,6 +1441,9 @@ static void parse_reloc_section(WObj *o, WRd *r)
         case WR_GLOBAL_INDEX_LEB:
             patch_uleb(p, 0); /* __stack_pointer is global 0 */
             break;
+        case WR_TAG_INDEX_LEB:
+            put_elf_reloca(symtab_section, sec, toff, R_WASM_TAG_LEB, esym, 0);
+            break;
         case WR_TABLE_NUMBER_LEB:
             patch_uleb(p, 0);
             break;
@@ -1355,6 +1478,7 @@ static void wobj_free(WObj *o)
     tcc_free(o->syms);
     dynarray_reset(&o->sigs, &o->nb_sigs);
     tcc_free(o->func_types);
+    tcc_free(o->tag_types);
     tcc_free(o->body_start);
     tcc_free(o->body_len);
     tcc_free(o->text_off);
@@ -1409,6 +1533,7 @@ ST_FUNC int tcc_load_wasm_object(TCCState *s1, int fd, unsigned long file_offset
         case 1: parse_type_section(&o, &r); break;
         case 2: parse_import_section(&o, &r); break;
         case 3: parse_function_section(&o, &r); break;
+        case 13: parse_tag_section(&o, &r); break;
         case 10:
             o.code_secidx = secidx;
             o.code_contents = contents;

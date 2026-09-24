@@ -1870,6 +1870,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         tcc_add_support(s1, TCC_LIBTCC1);
         if (uses_ld)
             tcc_add_library(s1, "c-printscan-long-double");
+        tcc_add_library(s1, "setjmp"); /* __wasm_setjmp & co, see wasm32-gen.c */
         if (tcc_add_library(s1, "c") < 0)
             tcc_error_noabort("cannot find libc.a for wasm32 (see CONFIG_WASI_SYSROOT)");
         tcc_add_support(s1, TCC_LIBTCC1);
