@@ -28,6 +28,12 @@
 #endif
 #include "tcctools.c"
 
+#ifdef SHELLSIM_CLI
+/* Preview 1 has no chmod; shellsim provides the virtual filesystem operation. */
+extern int shellsim_path_chmod(const char *, unsigned, unsigned)
+    __asm__("shellsim.path_chmod");
+#endif
+
 static const char help[] =
     "Tiny C Compiler "TCC_VERSION" - Copyright (C) 2001-2006 Fabrice Bellard\n"
     "Usage: tcc [options...] [-o outfile] [-c] infile(s)...\n"
@@ -298,6 +304,18 @@ int main(int argc, char **argv)
     char **argv0 = argv;
     FILE *ppfp = NULL;
 
+#ifdef __wasi__
+    /* WASI preopens do not carry a process cwd. Initialize wasi-libc's cwd
+       from the caller's PWD before resolving relative source and output paths. */
+    {
+        const char *pwd = getenv("PWD");
+        if (pwd && *pwd && chdir(pwd) < 0) {
+            fprintf(stderr, "tcc: cannot change to PWD '%s'\n", pwd);
+            return 1;
+        }
+    }
+#endif
+
 redo:
     argc = argc0, argv = argv0;
     s = s1 = tcc_new();
@@ -408,6 +426,13 @@ redo:
                 s->outfile = default_outputfile(s, first_file);
             if (!s->just_deps)
                 ret = tcc_output_file(s, s->outfile);
+#ifdef SHELLSIM_CLI
+            if (!ret && !s->just_deps && s->output_type == TCC_OUTPUT_EXE &&
+                shellsim_path_chmod(s->outfile, strlen(s->outfile), 0755)) {
+                tcc_error_noabort("could not make '%s' executable", s->outfile);
+                ret = 1;
+            }
+#endif
             if (!ret && s->gen_deps)
                 gen_makedeps(s, s->outfile, s->deps_outfile);
         }

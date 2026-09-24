@@ -38,7 +38,7 @@ jobs:
       run: make test-wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
     - name: compile tcc itself with the wasm backend
-      run: make tcc.wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
+      run: make tcc.wasm tcc-shellsim.wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
     - name: check tcc.wasm compiles and runs a program
       run: |
@@ -51,7 +51,7 @@ jobs:
     - name: package
       run: |
         mkdir -p dist/tcc-wasm/include
-        cp tcc.wasm wasm32-libtcc1.a dist/tcc-wasm/
+        cp tcc.wasm tcc-shellsim.wasm wasm32-libtcc1.a shellsim_libc.c SHELLSIM-LIBC-LICENSE dist/tcc-wasm/
         cp include/*.h dist/tcc-wasm/include/
         cat > dist/tcc-wasm/README <<'TXT'
         tcc compiled to WebAssembly (wasm32 cross compiler, WASI). It uses
@@ -59,6 +59,12 @@ jobs:
 
         Needs a wasi-libc sysroot (wasi-sdk's wasi-sysroot) mounted at
         /wasi-sysroot and this directory mounted at /tcc:
+
+        tcc-shellsim.wasm additionally imports shellsim.path_chmod so linked
+        executables receive virtual execute permission. Its MIT-licensed
+        shellsim_libc.c bridge maps C chmod() to the same virtual syscall.
+        It is for shellsim,
+        while tcc.wasm remains usable on an ordinary WASI Preview 1 host.
 
             wasmtime run --dir . --dir /path/to/wasi-sysroot::/wasi-sysroot \
                 --dir /path/to/tcc-wasm::/tcc /path/to/tcc-wasm/tcc.wasm -o hello.wasm hello.c

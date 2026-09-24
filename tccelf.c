@@ -1871,6 +1871,12 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         if (uses_ld)
             tcc_add_library(s1, "c-printscan-long-double");
         tcc_add_library(s1, "setjmp"); /* __wasm_setjmp & co, see wasm32-gen.c */
+#ifdef SHELLSIM_CLI
+        /* Compile the small POSIX bridge into the same module before libc is scanned.
+           Preview 1 has no permission-changing operation. */
+        if (tcc_add_file(s1, "/tcc/shellsim_libc.c") < 0)
+            tcc_error_noabort("cannot find shellsim libc bridge");
+#endif
         if (tcc_add_library(s1, "c") < 0)
             tcc_error_noabort("cannot find libc.a for wasm32 (see CONFIG_WASI_SYSROOT)");
         tcc_add_support(s1, TCC_LIBTCC1);
