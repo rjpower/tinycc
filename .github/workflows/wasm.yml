@@ -1,0 +1,80 @@
+name: wasm
+
+on:
+  push:
+    branches: [ main, wasm ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v49.0.0
+
+jobs:
+  wasm32:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: install wasi-sysroot and wasmtime
+      run: |
+        curl -sSfL -o wasi-sysroot.tar.gz \
+          "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sysroot-${WASI_SDK_VERSION}.0.tar.gz"
+        tar xzf wasi-sysroot.tar.gz -C "$RUNNER_TEMP"
+        echo "WASI_SYSROOT=$RUNNER_TEMP/wasi-sysroot-${WASI_SDK_VERSION}.0" >> "$GITHUB_ENV"
+        curl -sSfL -o wasmtime.tar.xz \
+          "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+        tar xJf wasmtime.tar.xz -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
+
+    - name: build wasm32 cross compiler
+      run: ./configure && make cross-wasm32 CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
+
+    - name: run tests/tests2 under wasmtime
+      continue-on-error: true
+      run: make test-wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
+
+    - name: compile tcc itself with the wasm backend
+      run: make tcc.wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
+
+    - name: check tcc.wasm compiles and runs a program
+      run: |
+        printf '#include <stdio.h>\nint main(void) { puts("hello from tcc.wasm"); return 0; }\n' > hello.c
+        ./wasm32-tcc -B. -o hello-native.wasm hello.c
+        wasmtime run --dir . --dir "$WASI_SYSROOT"::/wasi-sysroot --dir .::/tcc tcc.wasm -o hello.wasm hello.c
+        wasmtime hello.wasm
+        cmp hello-native.wasm hello.wasm
+
+    - name: package
+      run: |
+        mkdir -p dist/tcc-wasm/include
+        cp tcc.wasm wasm32-libtcc1.a dist/tcc-wasm/
+        cp include/*.h dist/tcc-wasm/include/
+        cat > dist/tcc-wasm/README <<'TXT'
+        tcc compiled to WebAssembly (wasm32 cross compiler, WASI).
+
+        Needs a wasi-libc sysroot (wasi-sdk's wasi-sysroot) mounted at
+        /wasi-sysroot and this directory mounted at /tcc:
+
+            wasmtime run --dir . --dir /path/to/wasi-sysroot::/wasi-sysroot \
+                --dir /path/to/tcc-wasm::/tcc /path/to/tcc-wasm/tcc.wasm -o hello.wasm hello.c
+            wasmtime hello.wasm
+        TXT
+        tar czf tcc-wasm.tar.gz -C dist tcc-wasm
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: tcc-wasm
+        path: dist/tcc-wasm
+
+    - name: attach to release
+      if: startsWith(github.ref, 'refs/tags/v')
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+        gh release upload "$GITHUB_REF_NAME" tcc-wasm.tar.gz --clobber

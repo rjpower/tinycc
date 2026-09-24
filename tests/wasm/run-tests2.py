@@ -54,7 +54,7 @@ for t in tests:
     else:
         nfail+=1; fails.append((name,out[-600:] if len(out)>600 else out))
         open(OUT+'/'+name+'.out','w').write(out)
-print("PASS %d FAIL %d"%(npass,nfail))
-sys.exit(1 if nfail else 0)
 for n,m in fails:
     print("=== FAIL",n); print(m[:800])
+print("PASS %d FAIL %d"%(npass,nfail))
+sys.exit(1 if nfail else 0)

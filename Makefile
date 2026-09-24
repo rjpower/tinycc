@@ -154,6 +154,17 @@ cross-%: %-tcc$(EXESUF) %-libtcc1.a ;
 test-wasm: cross-wasm32
 	python3 $(TOPSRC)/tests/wasm/run-tests2.py
 
+# tcc itself compiled to wasm by the wasm32 cross compiler.  It expects
+# the wasi sysroot at /wasi-sysroot and libtcc1/include at /tcc, e.g.
+#   wasmtime run --dir . --dir $(CONFIG_WASI_SYSROOT)::/wasi-sysroot \
+#     --dir .::/tcc tcc.wasm -o hello.wasm hello.c
+tcc.wasm: cross-wasm32
+	$S./wasm32-tcc -B. -o $@ tcc.c -I. -DONE_SOURCE=1 -DTCC_TARGET_WASM32 \
+	  -DCONFIG_TCCDIR="\"/tcc\"" -DCONFIG_SYSROOT="\"/wasi-sysroot\"" \
+	  -DCONFIG_TCC_LIBPATHS="\"{B}:{R}/lib/wasm32-wasip1\"" \
+	  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
+	  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
+
 install: ; @$(MAKE) --no-print-directory  install$(CFG)
 install-strip: ; @$(MAKE) --no-print-directory  install$(CFG) CONFIG_strip=yes
 uninstall: ; @$(MAKE) --no-print-directory uninstall$(CFG)

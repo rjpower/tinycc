@@ -111,3 +111,14 @@ int f(int) __asm__("wasi_snapshot_preview1.fd_close")) are imported
 from that module. Not supported: inline assembly, bounds checking,
 setjmp/longjmp, threads, tcc -run. 'make test-wasm' runs tests/tests2
 under wasmtime. See the overview in wasm32-gen.c for the design.
+
+tcc can compile itself to wasm ('make tcc.wasm'). The result is a
+wasm32 cross compiler that runs under any WASI runtime, with the
+sysroot mounted at /wasi-sysroot and libtcc1/include at /tcc:
+
+    wasmtime run --dir . --dir /path/to/wasi-sysroot::/wasi-sysroot \
+        --dir .::/tcc tcc.wasm -o hello.wasm hello.c
+
+Since there is no longjmp, a compile error exits tcc.wasm instead of
+continuing with the next file. The wasm workflow in .github builds and
+tests tcc.wasm and uploads it as an artifact.
