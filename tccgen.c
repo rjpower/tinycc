@@ -7849,7 +7849,7 @@ static void write_ldouble(unsigned char *d, void *s)
     #elif (__i386__ || __x86_64__) && (defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64)
         /* extended -> extended */
         memcpy(d, s, 10);
-    #elif (__i386__ || __x86_64__) && (defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64)
+    #elif (__i386__ || __x86_64__) && (defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_WASM32)
         /* extended -> quad */
         uint64_t m = *(uint64_t*)s;
         int e = *(uint16_t*)((char*)s + 8);

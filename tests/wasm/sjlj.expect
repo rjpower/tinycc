@@ -3,7 +3,7 @@ middle: first
 outer: 50 depth=5
 zero -> 1
 count 3
-10 15 2.5 42
+10 15 2.5 42 7.5
 alloca ok
 middle: first
 middle: after inner

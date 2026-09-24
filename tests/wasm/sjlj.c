@@ -34,6 +34,7 @@ static int middle(int n)
 struct big { int a[6]; };
 static struct big mk(int v) { struct big b; int i; for (i = 0; i < 6; i++) b.a[i] = v + i; return b; }
 static double half(double d) { return d / 2; }
+static long double quad(long double x) { return x * 3; }
 static int (*fp)(int) = 0;
 static int twice(int x) { return 2 * x; }
 
@@ -69,7 +70,7 @@ int main(void)
     /* other kinds of calls inside a setjmp function */
     b = mk(10);
     d = half(5.0);
-    printf("%d %d %.1f %d\n", b.a[0], b.a[5], d, fp(21));
+    printf("%d %d %.1f %d %.1Lf\n", b.a[0], b.a[5], d, fp(21), quad(2.5L));
 
     /* the stack pointer is restored: deep frames are gone afterwards */
     {

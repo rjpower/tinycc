@@ -34,8 +34,7 @@ jobs:
     - name: build wasm32 cross compiler
       run: ./configure && make cross-wasm32 CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
-    - name: run tests/tests2 under wasmtime
-      continue-on-error: true
+    - name: run tests/tests2 and tests/wasm under wasmtime
       run: make test-wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
     - name: compile tcc itself with the wasm backend
