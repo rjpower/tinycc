@@ -64,8 +64,7 @@ typedef struct WasmLink {
     int *sym_func;      /* elf symbol index -> function, or -1 */
     char **sym_sig;     /* elf symbol index -> signature from call sites */
     int nb_sym_sig;
-    int *weak_stubs;    /* elf symbol indices of synthesized weak stubs */
-    int nb_weak_stubs;
+    char *sym_weak_stub; /* elf symbol index -> 1 if a trap stub was synthesized */
     int *off_func;      /* text offset -> function, or -1 */
     char **types;
     int nb_types;
@@ -233,12 +232,8 @@ static void collect_functions(WasmLink *wl)
             f->sig = (char *)text_section->data + esym->st_value;
             f->name = elf_sym_name(i);
             wl->off_func[esym->st_value] = wl->sym_func[i] = wl->nb_funcs - 1;
-            {
-                int k;
-                for (k = 0; k < wl->nb_weak_stubs; k++)
-                    if ((int)(size_t)wl->weak_stubs[k] == i)
-                        f->weak_stub = 1;
-            }
+            if (i < wl->nb_sym_sig)
+                f->weak_stub = wl->sym_weak_stub[i];
         } else if (esym->st_shndx == SHN_UNDEF && sym_is_func(esym)) {
             const char *name = elf_sym_name(i);
             const char *dot = strchr(name, '.');
@@ -295,13 +290,14 @@ static void synth_weak_stubs(WasmLink *wl)
     TCCState *s1 = wl->s1;
     int i;
     ElfW(Sym) *esym;
+    wl->sym_weak_stub = tcc_mallocz(wl->nb_sym_sig);
     for (i = 1; i < wl->nb_sym_sig; i++) {
         esym = elf_sym(i);
         if (esym->st_shndx == SHN_UNDEF && sym_is_func(esym)
             && ELFW(ST_BIND)(esym->st_info) == STB_WEAK && wl->sym_sig[i]
             && !strchr(elf_sym_name(i), '.')) {
             synth_trap_function(s1, elf_sym_name(i), wl->sym_sig[i]);
-            dynarray_add(&wl->weak_stubs, &wl->nb_weak_stubs, (void *)(size_t)i);
+            wl->sym_weak_stub[i] = 1;
         }
     }
 }
@@ -821,7 +817,7 @@ ST_FUNC int wasm_output_file(TCCState *s1, const char *filename)
     tcc_free(wl.funcs);
     tcc_free(wl.sym_func);
     tcc_free(wl.sym_sig);
-    tcc_free(wl.weak_stubs);
+    tcc_free(wl.sym_weak_stub);
     tcc_free(wl.off_func);
     tcc_free(wl.tags);
     tcc_free(wl.tag_types);
