@@ -39,10 +39,11 @@
      text section: plain wasm instructions, plus a few pseudo instructions
      (prefixed by 0xff) for jumps, symbol references and frame-relative
      accesses.  When the function is finished (gfunc_epilog), the stream
-     is split into basic blocks and rewritten into structured wasm:
-     forward jumps become 'br' out of nested blocks, backward jumps set a
-     label local and 'br' to an enclosing loop whose head dispatches with
-     'br_table'.
+     is split into basic blocks and rewritten into structured wasm by
+     wasm32-stackify.c: loops become 'loop', joins become 'block', and
+     conditional jumps become 'if'.  Computed goto, setjmp and
+     irreducible control flow fall back to a 'br_table' dispatch loop
+     (TCC_WASM_DISPATCH=1 in the environment forces it everywhere).
 
    - the output ELF object holds, per function, "<signature>\0" followed
      by the wasm function body (locals + code).  Relocations are padded
@@ -1313,143 +1314,21 @@ static void emit_landing(void)
     ob(W_BR); ouleb(0); /* the dispatch loop */
 }
 
-static int jmp_target(unsigned char *code, int p, int start, int end)
-{
-    unsigned t = read32le(code + p + 2);
-    if (!(t & JMP_RESOLVED))
-        return end - start; /* unresolved: treat as jump to function end */
-    t &= ~JMP_RESOLVED;
-    if ((int)t < start || (int)t > end)
-        tcc_error("internal: jump target out of function");
-    return t - start;
-}
+struct WasmCFG;
+static void emit_range(struct WasmCFG *c, int block, int landing_depth);
+#include "wasm32-stackify.c"
 
-/* Convert the intermediate stream of the current function into
-   structured wasm code.  See the overview at the top of the file. */
-static void wasm_finish_function(int frame)
+/* Expand the code of a block: plain wasm bytes are copied, pseudo
+   instructions are expanded.  landing_depth is the branch depth of the
+   setjmp landing block for try_table, or -1 outside setjmp functions. */
+static void emit_range(WasmCFG *c, int block, int landing_depth)
 {
-    unsigned char *code;
-    unsigned char *lead;
-    int *blk;
-    int start = func_ind, end = ind, len = end - start;
-    int p, tag, n, i, j, cur, has_back, nblocks, sjlj, loopd;
     Section *s = cur_text_section;
+    unsigned char *code = c->code;
+    int p = c->bb[block].start, end = c->bb[block].end, start = c->start;
+    int tag, frame = c->frame;
 
-    if (nocode_wanted)
-        return;
-
-    /* the generic code must not have added relocations of its own */
-    if (s->reloc) {
-        ElfW_Rel *rel;
-        for_each_elem(s->reloc, 0, rel, ElfW_Rel)
-            if (rel->r_offset >= (unsigned)start && rel->r_offset < (unsigned)end)
-                tcc_error("internal: unexpected relocation in wasm function");
-    }
-
-    code = s->data;
-    lead = tcc_mallocz(len + 2);
-    blk = tcc_malloc((len + 2) * sizeof(int));
-
-    /* pass 1: find basic block leaders */
-    lead[0] = 1;
-    has_back = sjlj = 0;
-    for (p = start; p < end; ) {
-        if (code[p] != 0xff) {
-            p++;
-            continue;
-        }
-        tag = code[p + 1];
-        if (tag == P_JMP || tag == P_JMPIF) {
-            lead[jmp_target(code, p, start, end)] = 1;
-            p += pseudo_size(tag);
-            if (tag == P_JMP)
-                lead[p - start] = 1;
-        } else if (tag == P_SJLABEL) {
-            /* longjmps come back through the dispatch loop */
-            lead[jmp_target(code, p, start, end)] = 1;
-            has_back = sjlj = 1;
-            p += pseudo_size(tag);
-        } else if (tag == P_JMPIND) {
-            has_back = 1;
-            p += pseudo_size(tag);
-            lead[p - start] = 1;
-        } else {
-            p += pseudo_size(tag);
-        }
-    }
-    /* labels are leaders too: their addresses become block indices */
-    for (i = 0; i < 2; i++) {
-        Sym *ls;
-        for (ls = i ? local_label_stack : global_label_stack; ls; ls = ls->prev)
-            if (ls->r == LABEL_DEFINED && ls->jind >= start && ls->jind < end)
-                lead[ls->jind - start] = 1;
-    }
-    n = 0;
-    for (i = 0; i <= len; i++)
-        blk[i] = lead[i] ? n++ : -1;
-    nblocks = n;
-    if (lead[len]) /* jumps to the end of the function */
-        nblocks--;
-    for (i = 0; i < 2; i++) {
-        Sym *ls;
-        for (ls = i ? local_label_stack : global_label_stack; ls; ls = ls->prev)
-            if (ls->r == LABEL_DEFINED && ls->jind >= start && ls->jind < end)
-                ls->jind = blk[ls->jind - start];
-    }
-
-    /* is any jump backwards (or to the same block)? */
-    cur = -1;
-    for (p = start; p < end; ) {
-        if (lead[p - start])
-            cur = blk[p - start];
-        if (code[p] != 0xff) {
-            p++;
-            continue;
-        }
-        tag = code[p + 1];
-        if (tag == P_JMP || tag == P_JMPIF) {
-            j = blk[jmp_target(code, p, start, end)];
-            if (j <= cur)
-                has_back = 1;
-        }
-        p += pseudo_size(tag);
-    }
-
-    /* pass 2: emit */
-    cstr_new(&wasm_out);
-    cstr_cat(&wasm_out, wasm_cur_sig, strlen(wasm_cur_sig) + 1);
-    /* locals: 4 x i32, 9 x i64, 8 x f64 */
-    ouleb(3);
-    ouleb(4); ob(0x7f);
-    ouleb(9); ob(0x7e);
-    ouleb(8); ob(0x7c);
-
-    n = nblocks;
-    if (has_back) {
-        ob(W_LOOP); ob(W_BLOCKTYPE_VOID);
-    }
-    /* the landing block of longjmp: it encloses all blocks, so the
-       loop is one level further out */
-    loopd = sjlj;
-    if (sjlj) {
-        ob(W_BLOCK); ob(W_BLOCKTYPE_I32);
-    }
-    for (i = 0; i < n; i++) {
-        ob(W_BLOCK); ob(W_BLOCKTYPE_VOID);
-    }
-    if (has_back) {
-        ob(W_LOCAL_GET); ouleb(L_LBL);
-        ob(W_BR_TABLE); ouleb(n);
-        for (i = 0; i < n; i++)
-            ouleb(i);
-        ouleb(0);
-    }
-    cur = -1;
-    for (p = start; p < end; ) {
-        if (lead[p - start]) {
-            cur = blk[p - start];
-            ob(W_END);
-        }
+    while (p < end) {
         if (code[p] != 0xff) {
             ob(code[p]);
             p++;
@@ -1460,42 +1339,8 @@ static void wasm_finish_function(int frame)
         case P_ESC:
             ob(0xff);
             break;
-        case P_JMP:
-            j = blk[jmp_target(code, p, start, end)];
-            if (j >= nblocks) {
-                /* jump to function end: return */
-                ob(W_UNREACHABLE);
-            } else if (j > cur) {
-                if (j != cur + 1) {
-                    ob(W_BR); ouleb(j - cur - 1);
-                }
-            } else {
-                ob(W_I32_CONST); osleb(j);
-                ob(W_LOCAL_SET); ouleb(L_LBL);
-                ob(W_BR); ouleb(n - cur - 1 + loopd);
-            }
-            break;
-        case P_JMPIND:
-            ob(W_BR); ouleb(n - cur - 1 + loopd);
-            break;
-        case P_JMPIF:
-            j = blk[jmp_target(code, p, start, end)];
-            if (j >= nblocks) {
-                ob(W_IF); ob(W_BLOCKTYPE_VOID);
-                ob(W_UNREACHABLE);
-                ob(W_END);
-            } else if (j > cur) {
-                ob(W_BR_IF); ouleb(j - cur - 1);
-            } else {
-                ob(W_IF); ob(W_BLOCKTYPE_VOID);
-                ob(W_I32_CONST); osleb(j);
-                ob(W_LOCAL_SET); ouleb(L_LBL);
-                ob(W_BR); ouleb(n - cur + loopd);
-                ob(W_END);
-            }
-            break;
         case P_CALLBEG:
-            if (sjlj) {
+            if (landing_depth >= 0) {
                 /* try_table (result) catch __c_longjmp -> landing block */
                 ob(W_TRY_TABLE); ob(code[p + 2]);
                 ouleb(1);
@@ -1503,17 +1348,18 @@ static void wasm_finish_function(int frame)
                 put_elf_reloca(symtab_section, s, start + wasm_out.size, R_WASM_TAG_LEB,
                                wasm_tag_symbol(tcc_state, "__c_longjmp"), 0);
                 ouleb_padded(0);
-                ouleb(n - cur - 1);
+                ouleb(landing_depth);
             }
             break;
         case P_CALLEND:
-            if (sjlj)
+            if (landing_depth >= 0)
                 ob(W_END);
             break;
-        case P_SJLABEL:
-            j = blk[jmp_target(code, p, start, end)];
-            ob(W_I32_CONST); osleb(j);
+        case P_SJLABEL: {
+            int t = cfg_jmp_target(c, p);
+            ob(W_I32_CONST); osleb(t < 0 ? 0 : c->blk[t]);
             break;
+        }
         case P_SYM: {
             int type = code[p + 2];
             int symidx = read32le(code + p + 3);
@@ -1548,13 +1394,62 @@ static void wasm_finish_function(int frame)
             ob(opc); ouleb(align); ouleb(off);
             break;
         }
+        default:
+            tcc_error("internal: jump inside a basic block");
         }
         p += pseudo_size(tag);
     }
-    if (sjlj)
-        emit_landing();
-    if (has_back)
-        ob(W_END);
+}
+
+/* Convert the intermediate stream of the current function into
+   structured wasm code.  See the overview at the top of the file. */
+static void wasm_finish_function(int frame)
+{
+    WasmCFG cfg;
+    int start = func_ind, end = ind, i;
+    Section *s = cur_text_section;
+    static int force_dispatch = -1;
+
+    if (nocode_wanted)
+        return;
+
+    /* the generic code must not have added relocations of its own */
+    if (s->reloc) {
+        ElfW_Rel *rel;
+        for_each_elem(s->reloc, 0, rel, ElfW_Rel)
+            if (rel->r_offset >= (unsigned)start && rel->r_offset < (unsigned)end)
+                tcc_error("internal: unexpected relocation in wasm function");
+    }
+
+    cfg_build(&cfg, s->data, start, end, frame);
+    /* label addresses (for computed goto) are block indices */
+    for (i = 0; i < 2; i++) {
+        Sym *ls;
+        for (ls = i ? local_label_stack : global_label_stack; ls; ls = ls->prev)
+            if (ls->r == LABEL_DEFINED && ls->jind >= start && ls->jind < end)
+                ls->jind = cfg.blk[ls->jind - start];
+    }
+
+    cstr_new(&wasm_out);
+    cstr_cat(&wasm_out, wasm_cur_sig, strlen(wasm_cur_sig) + 1);
+    /* locals: 4 x i32, 9 x i64, 8 x f64 */
+    ouleb(3);
+    ouleb(4); ob(0x7f);
+    ouleb(9); ob(0x7e);
+    ouleb(8); ob(0x7c);
+
+    /* TCC_WASM_DISPATCH=1 forces the dispatch loop, for comparisons */
+    if (force_dispatch < 0)
+        force_dispatch = getenv("TCC_WASM_DISPATCH") != NULL;
+    if (cfg.sjlj || cfg.jmpind || force_dispatch) {
+        emit_dispatch(&cfg);
+    } else {
+        cfg_analyze(&cfg);
+        if (cfg.irreducible)
+            emit_dispatch(&cfg);
+        else
+            emit_stackified(&cfg);
+    }
     ob(W_UNREACHABLE);
     ob(W_END);
 
@@ -1564,8 +1459,7 @@ static void wasm_finish_function(int frame)
     memcpy(s->data + start, wasm_out.data, wasm_out.size);
     ind = start + wasm_out.size;
     cstr_free(&wasm_out);
-    tcc_free(lead);
-    tcc_free(blk);
+    cfg_free(&cfg);
 }
 
 /* generate function epilog */

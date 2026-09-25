@@ -245,12 +245,13 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 arm64-win32_FILES = $(arm64_FILES) tccpe.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
-wasm32_FILES = $(CORE_FILES) wasm32-gen.c wasm32-link.c tccwasm.c
+wasm32_FILES = $(CORE_FILES) wasm32-gen.c wasm32-stackify.c wasm32-link.c tccwasm.c
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 
 # libtcc sources
-LIBTCC_SRC = $(filter-out tcc.c tcctools.c,$(filter %.c,$($T_FILES)))
+# wasm32-stackify.c is included by wasm32-gen.c
+LIBTCC_SRC = $(filter-out tcc.c tcctools.c wasm32-stackify.c,$(filter %.c,$($T_FILES)))
 
 ifeq ($(ONE_SOURCE),yes)
 LIBTCC_OBJ = $(X)libtcc.o
@@ -259,7 +260,7 @@ TCC_FILES = $(X)tcc.o
 $(X)tcc.o $(X)libtcc.o : $(TCCDEFS_H)
 else
 LIBTCC_OBJ = $(patsubst %.c,$(X)%.o,$(LIBTCC_SRC))
-LIBTCC_INC = $(filter %.h %-gen.c %-link.c,$($T_FILES))
+LIBTCC_INC = $(filter %.h %-gen.c %-link.c %-stackify.c,$($T_FILES))
 TCC_FILES = $(X)tcc.o $(LIBTCC_OBJ)
 $(X)tccpp.o : $(TCCDEFS_H)
 $(X)libtcc.o : DEFINES += -DONE_SOURCE=0

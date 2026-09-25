@@ -1,0 +1,15 @@
+duff: hello, world!
+goto_into_loop: 100 406
+fall_back_edge: 0 15
+nested: 13 224
+switch_loop: 84 -11 0
+computed: 18
+dowhile: 1006 1001
+sequence(0): -1
+sequence(13): 4
+sequence(26): 18
+sequence(39): 22
+sequence(52): 46
+find: 2 -1
+shortcircuit: -3
+dead: 2
