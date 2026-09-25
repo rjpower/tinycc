@@ -155,22 +155,30 @@ test-wasm: cross-wasm32
 	python3 $(TOPSRC)/tests/wasm/run-tests2.py
 
 # tcc itself compiled to wasm by the wasm32 cross compiler.  It expects
-# the wasi sysroot at /wasi-sysroot and libtcc1/include at /tcc, e.g.
-#   wasmtime run --dir . --dir $(CONFIG_WASI_SYSROOT)::/wasi-sysroot \
-#     --dir .::/tcc tcc.wasm -o hello.wasm hello.c
-tcc.wasm: cross-wasm32
-	$S./wasm32-tcc -B. -o $@ tcc.c -I. -DONE_SOURCE=1 -DTCC_TARGET_WASM32 \
-	  -DCONFIG_TCCDIR="\"/tcc\"" -DCONFIG_SYSROOT="\"/wasi-sysroot\"" \
-	  -DCONFIG_TCC_LIBPATHS="\"{B}:{R}/lib/wasm32-wasip1\"" \
-	  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
-	  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
+# the contents of the toolchain package (see wasm/README.md) at /tcc,
+# with the wasi sysroot subset at /tcc/sysroot.
+WASM_TCC_DEFS = -I. -DONE_SOURCE=1 -DTCC_TARGET_WASM32 \
+  -DCONFIG_TCCDIR="\"/tcc\"" -DCONFIG_SYSROOT="\"/tcc/sysroot\"" \
+  -DCONFIG_TCC_LIBPATHS="\"{B}:{R}/lib/wasm32-wasip1\"" \
+  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
+  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
 
+tcc.wasm: cross-wasm32
+	$S./wasm32-tcc -B. -o $@ tcc.c $(WASM_TCC_DEFS)
+
+# for shellsim: linked executables get virtual execute permission, see
+# shellsim_libc.c
 tcc-shellsim.wasm: cross-wasm32
-	$S./wasm32-tcc -B. -o $@ tcc.c -I. -DONE_SOURCE=1 -DTCC_TARGET_WASM32 \
-	  -DSHELLSIM_CLI -DCONFIG_TCCDIR="\"/tcc\"" -DCONFIG_SYSROOT="\"/wasi-sysroot\"" \
-	  -DCONFIG_TCC_LIBPATHS="\"{B}:{R}/lib/wasm32-wasip1\"" \
-	  -DCONFIG_TCC_SYSINCLUDEPATHS="\"{B}/include:{R}/include/wasm32-wasip1\"" \
-	  -DCONFIG_TCC_CROSSPREFIX="\"wasm32-\"" $(DEF_GITHASH)
+	$S./wasm32-tcc -B. -o $@ tcc.c $(WASM_TCC_DEFS) -DSHELLSIM_CLI
+
+libshellsim.a: shellsim_libc.c cross-wasm32
+	$S./wasm32-tcc -B. -c -o shellsim_libc.o shellsim_libc.c
+	$S./wasm32-tcc -ar rcs $@ shellsim_libc.o
+
+# the toolchain package: the compilers, runtime, headers and the wasi
+# sysroot subset (see wasm/README.md)
+wasm-package: tcc.wasm tcc-shellsim.wasm libshellsim.a
+	$Ssh wasm/package.sh "$(CONFIG_WASI_SYSROOT)" tcc-wasm.tar.gz
 
 install: ; @$(MAKE) --no-print-directory  install$(CFG)
 install-strip: ; @$(MAKE) --no-print-directory  install$(CFG) CONFIG_strip=yes

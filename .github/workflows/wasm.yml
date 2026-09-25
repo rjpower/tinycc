@@ -37,45 +37,23 @@ jobs:
     - name: run tests/tests2 and tests/wasm under wasmtime
       run: make test-wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
-    - name: compile tcc itself with the wasm backend
-      run: make tcc.wasm tcc-shellsim.wasm CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
+    - name: build the toolchain package
+      run: make wasm-package CONFIG_WASI_SYSROOT="$WASI_SYSROOT"
 
-    - name: check tcc.wasm compiles and runs a program
+    - name: check that the packaged tcc.wasm compiles and runs a program
       run: |
+        mkdir "$RUNNER_TEMP/tcc" && tar xzf tcc-wasm.tar.gz -C "$RUNNER_TEMP/tcc"
         printf '#include <stdio.h>\nint main(void) { puts("hello from tcc.wasm"); return 0; }\n' > hello.c
         ./wasm32-tcc -B. -o hello-native.wasm hello.c
-        wasmtime run --dir . --dir "$WASI_SYSROOT"::/wasi-sysroot --dir .::/tcc tcc.wasm -o hello.wasm hello.c
+        wasmtime run --dir . --dir "$RUNNER_TEMP/tcc"::/tcc "$RUNNER_TEMP/tcc/tcc.wasm" -o hello.wasm hello.c
         wasmtime hello.wasm
         cmp hello-native.wasm hello.wasm
-
-    - name: package
-      run: |
-        mkdir -p dist/tcc-wasm/include
-        cp tcc.wasm tcc-shellsim.wasm wasm32-libtcc1.a shellsim_libc.c SHELLSIM-LIBC-LICENSE dist/tcc-wasm/
-        cp include/*.h dist/tcc-wasm/include/
-        cat > dist/tcc-wasm/README <<'TXT'
-        tcc compiled to WebAssembly (wasm32 cross compiler, WASI). It uses
-        the wasm exception handling proposal (wasmtime 49 has it enabled).
-
-        Needs a wasi-libc sysroot (wasi-sdk's wasi-sysroot) mounted at
-        /wasi-sysroot and this directory mounted at /tcc:
-
-        tcc-shellsim.wasm additionally imports shellsim.path_chmod so linked
-        executables receive virtual execute permission. Its MIT-licensed
-        shellsim_libc.c bridge maps C chmod() to the same virtual syscall.
-        It is for shellsim,
-        while tcc.wasm remains usable on an ordinary WASI Preview 1 host.
-
-            wasmtime run --dir . --dir /path/to/wasi-sysroot::/wasi-sysroot \
-                --dir /path/to/tcc-wasm::/tcc /path/to/tcc-wasm/tcc.wasm -o hello.wasm hello.c
-            wasmtime hello.wasm
-        TXT
-        tar czf tcc-wasm.tar.gz -C dist tcc-wasm
+        cat "$RUNNER_TEMP/tcc/MANIFEST"
 
     - uses: actions/upload-artifact@v4
       with:
         name: tcc-wasm
-        path: dist/tcc-wasm
+        path: tcc-wasm.tar.gz
 
     - name: attach to release
       if: startsWith(github.ref, 'refs/tags/v')
