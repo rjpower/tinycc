@@ -389,39 +389,70 @@ static void anon_extent(int loc, int size)
     wasm_nb_anon_ext++;
 }
 
+/* a struct whose last member is a flexible array: a local of that type
+   is allocated larger than its type */
+static int has_flexible_member(CType *type)
+{
+    Sym *f;
+    int align;
+    if ((type->t & VT_BTYPE) != VT_STRUCT)
+        return 0;
+    for (f = type->ref->next; f; f = f->next)
+        if (!f->next)
+            return type_size(&f->type, &align) < 0;
+    return 0;
+}
+
 /* Push the address of frame offset 'loc', which the value of type
    'type' points into (or is, for a struct temporary).  The extent of
    the object the address is in is recorded for the promotion of the
    other slots to wasm locals (wasm32-locals.c).  tccgen folds offsets
-   into the address (&a[3]), so the object is looked up on the local
-   symbol stack, then among the backend's anonymous objects; a struct
-   or array temporary has its own type; anything else is unknown. */
+   into the address (&a[3], and &x + 1 which is the neighbour's base),
+   so every object on the local symbol stack and among the backend's
+   anonymous objects that the address is in or one past is included; a
+   struct or array temporary has its own type; anything else is unknown. */
 static void gen_locaddr(int loc, CType *type)
 {
     Sym *s;
-    int i, size, align, bt = type->t & VT_BTYPE;
+    int i, size, align, lo = 0, hi = 0, found = 0, bt = type->t & VT_BTYPE;
 
     for (s = local_stack; s; s = s->prev) {
         if ((s->r & VT_VALMASK) != VT_LOCAL || (s->v & SYM_FIELD) || s->v >= SYM_FIRST_ANOM)
             continue;
-        size = (s->type.t & VT_VLA) ? PTR_SIZE : type_size(&s->type, &align);
-        if (loc >= s->c && loc < s->c + size) {
-            p_locaddr(loc, s->c, size);
-            return;
+        if (s->type.t & VT_VLA)
+            size = PTR_SIZE;
+        else if (has_flexible_member(&s->type) && loc >= s->c)
+            goto unknown;
+        else
+            size = type_size(&s->type, &align);
+        if (loc >= s->c && loc <= s->c + size) {
+            if (!found || s->c < lo)
+                lo = s->c;
+            if (!found || s->c + size > hi)
+                hi = s->c + size;
+            found = 1;
         }
     }
     for (i = wasm_nb_anon_ext - 1; i >= 0; i--) {
         int aloc = wasm_anon_ext[2 * i], asize = wasm_anon_ext[2 * i + 1];
-        if (loc >= aloc && loc < aloc + asize) {
-            p_locaddr(loc, aloc, asize);
-            return;
+        if (loc >= aloc && loc <= aloc + asize) {
+            if (!found || aloc < lo)
+                lo = aloc;
+            if (!found || aloc + asize > hi)
+                hi = aloc + asize;
+            found = 1;
         }
     }
-    if (bt == VT_STRUCT || (type->t & VT_ARRAY))
-        size = type_size(type, &align);
-    else
-        size = -1;
-    p_locaddr(loc, loc, size);
+    if (found) {
+        p_locaddr(loc, lo, hi - lo);
+        return;
+    }
+    if (bt == VT_STRUCT || (type->t & VT_ARRAY)) {
+        p_locaddr(loc, loc, type_size(type, &align));
+        return;
+    }
+unknown:
+    p_locaddr(loc, loc, -1);
 }
 
 static void p_mem(int opc, int align, int loc)
@@ -1518,6 +1549,7 @@ static void wasm_finish_function(int frame)
         force_dispatch = getenv("TCC_WASM_DISPATCH") != NULL;
         no_promote = getenv("TCC_WASM_NOPROMOTE") != NULL;
     }
+    promo_free(); /* a previous function may have ended in an error */
     if (!no_promote)
         promo_analyze(s->data, start, end, frame, wasm_nparams + NB_FIXED_LOCALS + NB_REGS);
 

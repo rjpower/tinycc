@@ -151,6 +151,31 @@ static int sjlj(void)
     return count * 100 + last;
 }
 
+/* one past the end of an object is the base of its neighbour */
+static int pastend_scalar(void)
+{
+    int guard = 0;
+    int x = 42;
+    int *end = &x + 1;
+    return end[-1] + guard;
+}
+static int pastend_array(int i)
+{
+    int b = 5;
+    int a[4] = { 1, 2, 3, 4 };
+    int *e = a + 4;
+    return e[-i] + b;
+}
+
+/* a struct with an initialized flexible array member (a tcc extension) */
+struct flex { int n; int a[]; };
+static int flexsum(struct flex *p) { return p->a[0] + p->a[1]; }
+static int flexible(void)
+{
+    struct flex s = { 2, { 10, 20 } };
+    return flexsum(&s) + s.n;
+}
+
 int main(void)
 {
     printf("interior: %d\n", interior());
@@ -165,5 +190,7 @@ int main(void)
     printf("literal: %d\n", literal());
     printf("vla: %d\n", vla(5));
     printf("sjlj: %d\n", sjlj());
+    printf("pastend: %d %d\n", pastend_scalar(), pastend_array(1));
+    printf("flexible: %d\n", flexible());
     return 0;
 }
