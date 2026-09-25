@@ -276,8 +276,9 @@ static void scan_sigs(WasmLink *wl)
             if (type == R_WASM_FUNC_LEB) {
                 last_call = sym;
             } else if (type == R_WASM_SIG) {
+                /* a copy: adding symbols later reallocates the string table */
                 if (last_call > 0 && last_call < wl->nb_sym_sig && !wl->sym_sig[last_call])
-                    wl->sym_sig[last_call] = elf_sym_name(sym) + strlen(".wasm.sig:");
+                    wl->sym_sig[last_call] = tcc_strdup(elf_sym_name(sym) + strlen(".wasm.sig:"));
                 last_call = -1;
             }
         }
@@ -816,6 +817,8 @@ ST_FUNC int wasm_output_file(TCCState *s1, const char *filename)
     }
     tcc_free(wl.funcs);
     tcc_free(wl.sym_func);
+    for (i = 0; i < wl.nb_sym_sig; i++)
+        tcc_free(wl.sym_sig[i]);
     tcc_free(wl.sym_sig);
     tcc_free(wl.sym_weak_stub);
     tcc_free(wl.off_func);
