@@ -12,7 +12,7 @@ TOP=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC=TOP+'/tests/tests2'
 OUT=os.path.join(TOP,'tests','wasm','out')
 os.makedirs(OUT, exist_ok=True)
-TCC=[TOP+'/wasm32-tcc','-B'+TOP]
+TCC=[os.environ.get('WASM32_TCC',TOP+'/wasm32-tcc'),'-B'+TOP]
 ARGS={'31_args':['arg1','arg2','arg3','arg4','arg5'],
       '46_grep':['[^* ]*[:a:d: ]+\\:\\*-/: $', SRC+'/46_grep.c']}
 FLAGS={'76_dollars_in_identifiers':['-fdollars-in-identifiers'],

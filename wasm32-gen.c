@@ -33,7 +33,10 @@
      rounded to single precision after each operation.
 
    - all C locals/params live in linear memory in a frame addressed from
-     the 'fp' local, below a global stack pointer (wasm global 0).
+     the 'fp' local, below a global stack pointer (wasm global 0).  When
+     the function is finished, wasm32-locals.c moves the slots whose
+     address is never taken into wasm locals (TCC_WASM_NOPROMOTE=1 in
+     the environment keeps them in memory).
 
    - within a function we first emit an intermediate byte stream into the
      text section: plain wasm instructions, plus a few pseudo instructions
@@ -171,7 +174,7 @@ enum {
     P_SYM,          /* [u8 reloc][u32 sym][i32 addend] padded leb128 with relocation */
     P_SIG,          /* [u32 sym]                      signature marker relocation */
     P_PROLOG,       /* frame setup, expanded when the frame size is known */
-    P_LOCADDR,      /* [i32 loc]                      push address fp+frame+loc */
+    P_LOCADDR,      /* [i32 loc][i32 base][i32 size]  push address fp+frame+loc, inside the object [base, base+size) (size -1: unknown) */
     P_MEM,          /* [u8 opcode][u8 align][i32 loc] memory op at fp+frame+loc */
     P_JMPIND,       /* computed goto: L_LBL holds the target block */
     P_CALLBEG,      /* [u8 blocktype]                 start of a call sequence (args + call) */
@@ -184,7 +187,7 @@ enum {
 #define P_SYM_SIZE 11
 #define P_SIG_SIZE 6
 #define P_PROLOG_SIZE 2
-#define P_LOCADDR_SIZE 6
+#define P_LOCADDR_SIZE 14
 #define P_MEM_SIZE 8
 #define P_JMPIND_SIZE 2
 #define P_CALLBEG_SIZE 3
@@ -363,11 +366,62 @@ static void p_sig(const char *sig)
     g_le32_raw(c);
 }
 
-static void p_locaddr(int loc)
+static void p_locaddr(int loc, int base, int size)
 {
     g_raw(0xff);
     g_raw(P_LOCADDR);
     g_le32_raw(loc);
+    g_le32_raw(base);
+    g_le32_raw(size);
+}
+
+/* frame objects of this backend's own making whose address is taken
+   (argument copies, buffers): their extents, most recent last */
+static int *wasm_anon_ext;
+static int wasm_nb_anon_ext;
+
+static void anon_extent(int loc, int size)
+{
+    if (!(wasm_nb_anon_ext & 63))
+        wasm_anon_ext = tcc_realloc(wasm_anon_ext, (wasm_nb_anon_ext + 64) * 2 * sizeof(int));
+    wasm_anon_ext[2 * wasm_nb_anon_ext] = loc;
+    wasm_anon_ext[2 * wasm_nb_anon_ext + 1] = size;
+    wasm_nb_anon_ext++;
+}
+
+/* Push the address of frame offset 'loc', which the value of type
+   'type' points into (or is, for a struct temporary).  The extent of
+   the object the address is in is recorded for the promotion of the
+   other slots to wasm locals (wasm32-locals.c).  tccgen folds offsets
+   into the address (&a[3]), so the object is looked up on the local
+   symbol stack, then among the backend's anonymous objects; a struct
+   or array temporary has its own type; anything else is unknown. */
+static void gen_locaddr(int loc, CType *type)
+{
+    Sym *s;
+    int i, size, align, bt = type->t & VT_BTYPE;
+
+    for (s = local_stack; s; s = s->prev) {
+        if ((s->r & VT_VALMASK) != VT_LOCAL || (s->v & SYM_FIELD) || s->v >= SYM_FIRST_ANOM)
+            continue;
+        size = (s->type.t & VT_VLA) ? PTR_SIZE : type_size(&s->type, &align);
+        if (loc >= s->c && loc < s->c + size) {
+            p_locaddr(loc, s->c, size);
+            return;
+        }
+    }
+    for (i = wasm_nb_anon_ext - 1; i >= 0; i--) {
+        int aloc = wasm_anon_ext[2 * i], asize = wasm_anon_ext[2 * i + 1];
+        if (loc >= aloc && loc < aloc + asize) {
+            p_locaddr(loc, aloc, asize);
+            return;
+        }
+    }
+    if (bt == VT_STRUCT || (type->t & VT_ARRAY))
+        size = type_size(type, &align);
+    else
+        size = -1;
+    p_locaddr(loc, loc, size);
 }
 
 static void p_mem(int opc, int align, int loc)
@@ -600,7 +654,7 @@ static void gen_addr(SValue *sv)
     int v = sv->r & VT_VALMASK;
     int fc = sv->c.i;
     if (v == VT_LOCAL) {
-        p_locaddr(fc);
+        gen_locaddr(fc, &sv->type);
     } else if (v == VT_LLOCAL) {
         w_local_get(L_FP);
         p_mem(W_I32_LOAD, 2, fc);
@@ -690,7 +744,7 @@ ST_FUNC void load(int r, SValue *sv)
             }
             w_local_set(L_REG(r));
         } else if (v == VT_LOCAL) {
-            p_locaddr(fc);
+            gen_locaddr(fc, &sv->type);
             w_op(W_I64_EXTEND_I32_S);
             w_local_set(L_REG(r));
         } else if (v == VT_LLOCAL) {
@@ -784,6 +838,7 @@ static void struct_arg_to_ptr(SValue *e)
         align = 4;
     loc = (loc - size) & -align;
     addr = loc; /* 'loc' may move during the copy (register spills) */
+    anon_extent(addr, size);
     vset(&e->type, VT_LOCAL | VT_LVAL, addr);
     vpushv(e);
     vstore();
@@ -951,8 +1006,14 @@ ST_FUNC void gfunc_call(int nb_args)
 
     /* number of declared parameters (plus the hidden struct return pointer) */
     ndecl = 0;
-    if ((f->type.t & VT_BTYPE) == VT_STRUCT)
+    if ((f->type.t & VT_BTYPE) == VT_STRUCT) {
+        int align;
         ndecl++;
+        /* the pointer to the temporary for the result, pushed by tccgen */
+        e = vtop - nb_args + 1;
+        if ((e->r & (VT_VALMASK | VT_LVAL)) == VT_LOCAL)
+            anon_extent(e->c.i, type_size(&f->type, &align));
+    }
     if (func_type != FUNC_OLD)
         for (e = (SValue*)f->next; e; e = (SValue*)((Sym*)e)->next)
             ndecl++;
@@ -991,6 +1052,7 @@ ST_FUNC void gfunc_call(int nb_args)
         }
         loc = (loc - total) & -WASM_STACK_ALIGN;
         va_loc = loc; /* 'loc' may move below (register spills) */
+        anon_extent(va_loc, total);
         for (i = 0; i < nvar; i++) {
             e = vtop - nvar + 1 + i;
             vpushv(e);
@@ -1042,7 +1104,7 @@ ST_FUNC void gfunc_call(int nb_args)
     res = strchr(sig, ':') + 1;
     p_callbeg(*res);
     if (ld_ret)
-        p_locaddr(ld_sret);
+        p_locaddr(ld_sret, ld_sret, LDOUBLE_SIZE);
     for (i = 0; i < nb_args; i++)
         push_arg_value(vtop - nb_args + 1 + i, kind_of_type(&vtop[-nb_args + 1 + i].type));
     if (is_direct) {
@@ -1057,7 +1119,7 @@ ST_FUNC void gfunc_call(int nb_args)
     }
     p_callend();
     if (ld_ret) {
-        p_locaddr(ld_sret);
+        p_locaddr(ld_sret, ld_sret, LDOUBLE_SIZE);
         gen_helper_call("__tcc_ld_load", "i:F");
         w_local_set(L_REG(REG_FRET));
     }
@@ -1096,6 +1158,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     loc = 0;
     func_vc = 0;
     wasm_cond_op = -1;
+    wasm_nb_anon_ext = 0;
     wasm_va_slot = 0;
     wasm_ldret_slot = 0;
 
@@ -1222,6 +1285,20 @@ static int frame_off(int frame, int loc)
     return off;
 }
 
+static int pseudo_size(int tag);
+#include "wasm32-locals.c"
+
+/* a store into the frame from the prolog: fp and the value are on the stack */
+static void prolog_store(int frame, int opc, int align, int loc)
+{
+    int local = promo_local(loc);
+    if (local >= 0) {
+        promo_emit_mem(opc, local);
+    } else {
+        ob(opc); ouleb(align); ouleb(frame_off(frame, loc));
+    }
+}
+
 static void emit_prolog(int frame)
 {
     int i;
@@ -1245,14 +1322,14 @@ static void emit_prolog(int frame)
             /* the two words of a quad */
             ob(W_LOCAL_GET); ouleb(L_FP);
             ob(W_LOCAL_GET); ouleb(idx + 1);
-            ob(W_I64_STORE); ouleb(3); ouleb(frame_off(frame, wasm_params[i].slot + 8));
+            prolog_store(frame, W_I64_STORE, 3, wasm_params[i].slot + 8);
             opc = W_I64_STORE; align = 3;
             break;
         default:  opc = W_I32_STORE; align = 2; break;
         }
         ob(W_LOCAL_GET); ouleb(L_FP);
         ob(W_LOCAL_GET); ouleb(idx);
-        ob(opc); ouleb(align); ouleb(frame_off(frame, wasm_params[i].slot));
+        prolog_store(frame, opc, align, wasm_params[i].slot);
     }
     ob(W_LOCAL_GET); ouleb(L_FP);
     ob(W_GLOBAL_SET); ouleb(0);
@@ -1390,8 +1467,13 @@ static void emit_range(WasmCFG *c, int block, int landing_depth)
         }
         case P_MEM: {
             int opc = code[p + 2], align = code[p + 3];
-            int off = frame_off(frame, (int)read32le(code + p + 4));
-            ob(opc); ouleb(align); ouleb(off);
+            int loc = (int)read32le(code + p + 4);
+            int local = promo_local(loc);
+            if (local >= 0) {
+                promo_emit_mem(opc, local);
+            } else {
+                ob(opc); ouleb(align); ouleb(frame_off(frame, loc));
+            }
             break;
         }
         default:
@@ -1408,7 +1490,7 @@ static void wasm_finish_function(int frame)
     WasmCFG cfg;
     int start = func_ind, end = ind, i;
     Section *s = cur_text_section;
-    static int force_dispatch = -1;
+    static int force_dispatch = -1, no_promote;
 
     if (nocode_wanted)
         return;
@@ -1430,17 +1512,27 @@ static void wasm_finish_function(int frame)
                 ls->jind = cfg.blk[ls->jind - start];
     }
 
+    /* TCC_WASM_DISPATCH=1 forces the dispatch loop and TCC_WASM_NOPROMOTE=1
+       keeps every local in memory, for comparisons */
+    if (force_dispatch < 0) {
+        force_dispatch = getenv("TCC_WASM_DISPATCH") != NULL;
+        no_promote = getenv("TCC_WASM_NOPROMOTE") != NULL;
+    }
+    if (!no_promote)
+        promo_analyze(s->data, start, end, frame, wasm_nparams + NB_FIXED_LOCALS + NB_REGS);
+
     cstr_new(&wasm_out);
     cstr_cat(&wasm_out, wasm_cur_sig, strlen(wasm_cur_sig) + 1);
-    /* locals: 4 x i32, 9 x i64, 8 x f64 */
-    ouleb(3);
+    /* locals: the fixed ones (4 x i32, 9 x i64, 8 x f64), then the
+       promoted slots by type */
+    ouleb(3 + !!wasm_promo.nb_i64 + !!wasm_promo.nb_f32 + !!wasm_promo.nb_f64);
     ouleb(4); ob(0x7f);
     ouleb(9); ob(0x7e);
     ouleb(8); ob(0x7c);
+    if (wasm_promo.nb_i64) { ouleb(wasm_promo.nb_i64); ob(0x7e); }
+    if (wasm_promo.nb_f32) { ouleb(wasm_promo.nb_f32); ob(0x7d); }
+    if (wasm_promo.nb_f64) { ouleb(wasm_promo.nb_f64); ob(0x7c); }
 
-    /* TCC_WASM_DISPATCH=1 forces the dispatch loop, for comparisons */
-    if (force_dispatch < 0)
-        force_dispatch = getenv("TCC_WASM_DISPATCH") != NULL;
     if (cfg.sjlj || cfg.jmpind || force_dispatch) {
         emit_dispatch(&cfg);
     } else {
@@ -1460,6 +1552,7 @@ static void wasm_finish_function(int frame)
     ind = start + wasm_out.size;
     cstr_free(&wasm_out);
     cfg_free(&cfg);
+    promo_free();
 }
 
 /* generate function epilog */
